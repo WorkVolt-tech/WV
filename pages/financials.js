@@ -222,23 +222,40 @@ async function loadCostCenters() {
 // ── Cross-module integration ──────────────────────────────────────
 // Try each module; silently skip if not installed (api will throw)
 async function loadCrossModuleData() {
-  const tryLoad = async (module, apiPath, stateKey) => {
+  const tryLoad = async (module, apiPath) => {
     try {
       const d = await api(apiPath);
-      if (d && !d.error) {
-        state.modules[module].installed = true;
-        state.modules[module].data = d.rows || d.payments || d.items || d || [];
+      // A valid response is anything that came back without an error key
+      if (d && d.error) {
+        console.warn('[Financials] ' + module + ' API error:', d.error);
+        state.modules[module].installed = false;
+        return;
       }
+      state.modules[module].installed = true;
+      state.modules[module].data = d.rows || d.items || (Array.isArray(d) ? d : []);
+      console.log('[Financials] ' + module + ' loaded:', state.modules[module].data.length, 'records');
     } catch(e) {
+      // Module not installed or network error — silent skip is fine
+      console.warn('[Financials] ' + module + ' not available:', e.message || e);
       state.modules[module].installed = false;
     }
   };
 
   await Promise.allSettled([
-    tryLoad('payroll',  'payroll/payments/list',    'payroll'),
-    tryLoad('assets',   'assets/maintenance/list',  'assets'),
-    tryLoad('tasks',    'tasks/list',               'tasks'),
+    tryLoad('payroll', 'payroll/runs/list'),
+    tryLoad('assets',  'assets/maintenance/list'),
+    tryLoad('tasks',   'tasks/list'),
   ]);
+}
+
+// Calculate net pay from a payroll run record
+// The payroll module stores computed net directly in r.net
+// Fall back to gross - deductions for older records
+function calcPayrollNet(r) {
+  if (r.net !== undefined && r.net !== '') return parseFloat(r.net) || 0;
+  const gross = (parseFloat(r.gross) || 0) + (parseFloat(r.bonuses || r.bonus) || 0);
+  const ded   = (parseFloat(r.deductions) || 0) + (parseFloat(r.tax_total || r.tax) || 0);
+  return Math.max(0, gross - ded);
 }
 async function loadReports() {
   try {
@@ -295,7 +312,7 @@ function renderDashboard(c) {
 
   // Cross-module costs this month
   const payrollCost = state.modules.payroll.installed
-    ? state.modules.payroll.data.reduce((s,p) => s + (parseFloat(p.net_pay||p.amount||0)), 0) : 0;
+    ? state.modules.payroll.data.reduce((s,p) => s + calcPayrollNet(p), 0) : 0;
   const maintCost = state.modules.assets.installed
     ? state.modules.assets.data.reduce((s,m) => s + (parseFloat(m.cost||m.amount||0)), 0) : 0;
   const taskCost = state.modules.tasks.installed
@@ -323,8 +340,7 @@ function renderDashboard(c) {
   state.expenses.forEach(e => {
     if (e.category) expBreakRaw[e.category] = (expBreakRaw[e.category]||0) + (parseFloat(e.amount)||0);
   });
-  if (payrollCost > 0)  expBreakRaw['Payroll']           = (expBreakRaw['Payroll']||0) + payrollCost;
-  if (maintCost > 0)    expBreakRaw['Asset Maintenance']  = (expBreakRaw['Asset Maintenance']||0) + maintCost;
+  if (payrollCost > 0)  expBreakRaw['Payroll']           = (expBreakRaw['Payroll']||0) + payrollCost;  if (maintCost > 0)    expBreakRaw['Asset Maintenance']  = (expBreakRaw['Asset Maintenance']||0) + maintCost;
   if (taskCost > 0)     expBreakRaw['Task Costs']         = (expBreakRaw['Task Costs']||0) + taskCost;
   if (monthBills > 0)   expBreakRaw['Bills']              = (expBreakRaw['Bills']||0) + monthBills;
 
@@ -837,7 +853,7 @@ function renderBudgets(c) {
 function renderReports(c) {
   if (!state.incomeStmt) {
     c.innerHTML = `<div class="flex items-center justify-center h-48"><i class="fas fa-circle-notch fa-spin text-emerald-500 text-2xl opacity-50"></i></div>`;
-    loadReports().then(() => renderReports(c));
+    Promise.all([loadReports(), loadCrossModuleData()]).then(() => renderReports(c));
     return;
   }
   const is = state.incomeStmt || {};
@@ -863,7 +879,7 @@ function renderReports(c) {
 
           // Cross-module costs
           const payrollTotal = state.modules.payroll.installed
-            ? state.modules.payroll.data.reduce((s,p)=>s+(parseFloat(p.net_pay||p.amount||0)),0) : 0;
+            ? state.modules.payroll.data.reduce((s,p)=>s+calcPayrollNet(p),0) : 0;
           const maintTotal   = state.modules.assets.installed
             ? state.modules.assets.data.reduce((s,m)=>s+(parseFloat(m.cost||m.amount||0)),0) : 0;
           const taskTotal    = state.modules.tasks.installed
@@ -984,7 +1000,7 @@ function renderReports(c) {
     ${renderCrossModuleReport()}
 
     <div class="text-center">
-      <button onclick="loadReports().then(()=>renderReports(document.getElementById('fin-content')))" class="px-4 py-2 text-sm text-slate-500 hover:text-slate-700 bg-white border border-slate-200 rounded-lg font-semibold transition-colors">
+      <button onclick="Promise.all([loadReports(),loadCrossModuleData()]).then(()=>renderReports(document.getElementById('fin-content')))" class="px-4 py-2 text-sm text-slate-500 hover:text-slate-700 bg-white border border-slate-200 rounded-lg font-semibold transition-colors">
         <i class="fas fa-sync-alt mr-2"></i>Refresh Reports
       </button>
     </div>
@@ -998,8 +1014,11 @@ function renderCrossModuleReport() {
   // Payroll
   if (mods.payroll.installed) {
     const payments = mods.payroll.data;
-    const totalPayroll = payments.reduce((s,p) => s + (parseFloat(p.net_pay || p.amount || 0)), 0);
-    const pending = payments.filter(p => p.status === 'Pending' || p.status === 'Processing').reduce((s,p) => s + (parseFloat(p.net_pay || p.amount || 0)), 0);
+    const totalPayroll = payments.reduce((s,p) => s + calcPayrollNet(p), 0);
+    const pending = payments.filter(p => p.status === 'Pending' || p.status === 'Draft')
+                            .reduce((s,p) => s + calcPayrollNet(p), 0);
+    const paid    = payments.filter(p => p.status === 'Paid')
+                            .reduce((s,p) => s + calcPayrollNet(p), 0);
     sections.push(`
       <div class="bg-white rounded-xl border border-slate-200 p-6">
         <h3 class="font-extrabold text-slate-800 text-base mb-4 flex items-center gap-2">
@@ -1008,9 +1027,10 @@ function renderCrossModuleReport() {
           <span class="ml-2 text-xs font-semibold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">Connected</span>
         </h3>
         <div class="space-y-1">
-          ${reportLine('Total Payroll Processed', fmt.currency(totalPayroll), 'font-semibold text-red-500')}
-          ${reportLine('Pending Payments', fmt.currency(pending), 'text-amber-600')}
-          ${reportLine('Payroll Records', String(payments.length), 'text-slate-500')}
+          ${reportLine('Total Net Payroll', fmt.currency(totalPayroll), 'font-semibold text-red-500')}
+          ${reportLine('Paid', fmt.currency(paid), 'text-emerald-600')}
+          ${reportLine('Pending / Draft', fmt.currency(pending), 'text-amber-600')}
+          ${reportLine('Pay Runs', String(payments.length), 'text-slate-500')}
         </div>
         ${totalPayroll > 0 ? `<p class="text-xs text-slate-400 mt-3 pt-3 border-t border-slate-100"><i class="fas fa-info-circle mr-1"></i>Payroll costs are deducted in the Net Profit calculation.</p>` : ''}
       </div>`);
@@ -1182,6 +1202,21 @@ function getForm(id) {
   return Object.fromEntries(new FormData(form).entries());
 }
 
+// Normalize any date string to YYYY-MM-DD for <input type="date"> value attributes
+function dateVal(s) {
+  if (!s) return '';
+  // Already YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // ISO timestamp: 2025-03-01T00:00:00.000Z  →  2025-03-01
+  if (s.includes('T')) return s.split('T')[0];
+  // Fallback: try parsing
+  try {
+    const d = new Date(s);
+    if (!isNaN(d)) return d.toISOString().split('T')[0];
+  } catch(e) {}
+  return '';
+}
+
 // Invoice Modal
 function showInvoiceModal(inv = null) {
   const isEdit = !!inv;
@@ -1192,8 +1227,8 @@ function showInvoiceModal(inv = null) {
       ${field('Customer Name', 'customer', 'text', inv?.customer)}
       ${field('Customer Email', 'customer_email', 'email', inv?.customer_email)}
       <div class="grid grid-cols-2 gap-3">
-        ${field('Issue Date', 'issue_date', 'date', inv?.issue_date || today)}
-        ${field('Due Date', 'due_date', 'date', inv?.due_date)}
+        ${field('Issue Date', 'issue_date', 'date', dateVal(inv?.issue_date) || today)}
+        ${field('Due Date', 'due_date', 'date', dateVal(inv?.due_date))}
       </div>
       <div class="grid grid-cols-2 gap-3">
         ${field('Subtotal ($)', 'subtotal', 'number', inv?.subtotal, 'step="0.01" min="0" oninput="FinPage._calcInvTotal()"')}
@@ -1251,7 +1286,7 @@ function showExpenseModal(exp = null) {
   modal(
     exp ? 'Edit Expense' : 'Log Expense',
     `<form id="exp-form" class="space-y-3">
-      ${field('Date', 'date', 'date', exp?.date || today)}
+      ${field('Date', 'date', 'date', dateVal(exp?.date) || today)}
       ${field('Vendor', 'vendor', 'text', exp?.vendor)}
       ${sel('Category', 'category', EXP_CATS, exp?.category || EXP_CATS[0])}
       ${field('Description', 'description', 'text', exp?.description)}
@@ -1287,8 +1322,8 @@ function showBillModal(bill = null) {
       ${field('Vendor', 'vendor', 'text', bill?.vendor)}
       ${field('Vendor Email', 'vendor_email', 'email', bill?.vendor_email)}
       <div class="grid grid-cols-2 gap-3">
-        ${field('Issue Date', 'issue_date', 'date', bill?.issue_date || today)}
-        ${field('Due Date', 'due_date', 'date', bill?.due_date)}
+        ${field('Issue Date', 'issue_date', 'date', dateVal(bill?.issue_date) || today)}
+        ${field('Due Date', 'due_date', 'date', dateVal(bill?.due_date))}
       </div>
       ${sel('Category', 'category', EXP_CATS, bill?.category || EXP_CATS[0])}
       ${field('Amount ($)', 'amount', 'number', bill?.amount, 'step="0.01" min="0"')}
