@@ -156,12 +156,21 @@ function updateHeaderActions() {
     budgets:  `<button onclick="FinPage.newBudget()" class="btn-fin-primary"><i class="fas fa-plus text-xs"></i>Set Budget</button>`,
     accounts: `<button onclick="FinPage.newAccount()" class="btn-fin-primary"><i class="fas fa-plus text-xs"></i>New Account</button>`,
   };
-  el.innerHTML = (actions[state.tab] || '') + `
+    el.innerHTML = (actions[state.tab] || '') + `
     <style>
       .btn-fin-primary{display:flex;align-items:center;gap:.4rem;padding:.5rem 1rem;background:#10b981;color:#fff;border:none;border-radius:8px;font-size:.8125rem;font-weight:600;cursor:pointer;transition:background .15s;font-family:inherit}
       .btn-fin-primary:hover{background:#059669}
       .btn-fin-secondary{display:flex;align-items:center;gap:.4rem;padding:.5rem 1rem;background:#f1f5f9;color:#475569;border:none;border-radius:8px;font-size:.8125rem;font-weight:600;cursor:pointer;transition:background .15s;font-family:inherit}
       .btn-fin-secondary:hover{background:#e2e8f0}
+      
+      /* Collapsible sections */
+      .collapsible-header{cursor:pointer;display:flex;align-items:center;justify-content:space-between;padding:8px 0;user-select:none}
+      .collapsible-header:hover{opacity:0.8}
+      .collapsible-icon{transition:transform 0.2s;font-size:12px;color:#64748b}
+      .collapsible-icon.open{transform:rotate(90deg)}
+      .collapsible-content{overflow:hidden;transition:max-height 0.3s ease-out,max-width 0.3s ease-out}
+      .collapsible-content.collapsed{max-height:0;max-width:0}
+      .collapsible-content.expanded{max-height:500px;max-width:100%}
     </style>`;
 
   // Attach handlers
@@ -186,6 +195,28 @@ async function loadAll() {
   ]);
   renderTab();
   updateHeaderActions();
+}
+
+// ── Refresh dashboard + reports in background after any data change ──
+// Call this after every save so numbers update immediately without
+// requiring a full page reload or manual tab switch.
+function refreshLinkedTabs() {
+  // Always re-render the current tab first
+  const c = document.getElementById('fin-content');
+
+  // Re-render dashboard KPIs immediately (uses local state, no extra API call)
+  // We patch state.dashboard so the trend/KPI uses fresh invoice/expense data
+  if (state.tab === 'dashboard' && c) renderDashboard(c);
+
+  // If on reports, re-render immediately from local state
+  if (state.tab === 'reports' && c) {
+    // Reset so renderReports re-fetches cleanly
+    state.incomeStmt = null;
+    renderReports(c);
+  }
+
+  // Always silently reload dashboard data in background so next visit is fresh
+  loadDashboard();
 }
 
 async function loadDashboard() {
@@ -344,48 +375,57 @@ function renderDashboard(c) {
   if (taskCost > 0)     expBreakRaw['Task Costs']         = (expBreakRaw['Task Costs']||0) + taskCost;
   if (monthBills > 0)   expBreakRaw['Bills']              = (expBreakRaw['Bills']||0) + monthBills;
 
-  // Monthly trend (use server data if available, else derive from invoices/expenses)
-  const trend = (d.monthly_trend && d.monthly_trend.length) ? d.monthly_trend : (() => {
-    const months = {};
-    for (let i = 5; i >= 0; i--) {
-      const d2 = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const key = `${d2.getFullYear()}-${String(d2.getMonth()+1).padStart(2,'0')}`;
-      months[key] = { month: key, revenue: 0, expenses: 0, profit: 0 };
-    }
-    state.invoices.forEach(inv => {
-      const m = (inv.issue_date||'').substring(0,7);
-      if (months[m]) months[m].revenue += parseFloat(inv.total)||0;
+  // ==========================================
+  // NEW TREND CHART - Simple and Reliable
+  // ==========================================
+  
+  // Build 6 months of data
+  const months = [];
+  for (let i = 5; i >= 0; i--) {
+    const d2 = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    months.push({
+      key: `${d2.getFullYear()}-${String(d2.getMonth()+1).padStart(2,'0')}`,
+      label: d2.toLocaleDateString('en-US', { month: 'short' }),
+      isCurrent: i === 0
     });
-    state.expenses.forEach(e => {
-      const m = (e.date||'').substring(0,7);
-      if (months[m]) months[m].expenses += parseFloat(e.amount)||0;
-    });
-    state.bills.forEach(b => {
-      const m = ((b.issue_date||b.due_date||'')).substring(0,7);
-      if (months[m]) months[m].expenses += parseFloat(b.amount)||0;
-    });
-    Object.values(months).forEach(m => m.profit = m.revenue - m.expenses);
-    return Object.values(months);
-  })();
+  }
+
+  // Fill in the numbers from invoices/expenses/bills
+  months.forEach(m => {
+    m.revenue = state.invoices
+      .filter(inv => (inv.issue_date || '').startsWith(m.key))
+      .reduce((sum, inv) => sum + (parseFloat(inv.total) || 0), 0);
+    
+    m.expenses = state.expenses
+      .filter(e => (e.date || '').startsWith(m.key))
+      .reduce((sum, e) => sum + (parseFloat(e.amount) || 0), 0);
+    
+    m.expenses += state.bills
+      .filter(b => ((b.issue_date || b.due_date || '')).startsWith(m.key))
+      .reduce((sum, b) => sum + (parseFloat(b.amount) || 0), 0);
+  });
+
+  // Find the highest value for scaling (minimum 1 to avoid divide by zero)
+  const maxValue = Math.max(...months.map(m => Math.max(m.revenue, m.expenses)), 1);
+
+  // Build the chart HTML - simple flex layout
+  const trendChart = months.map(m => {
+    // Calculate heights (0-100% scale)
+    const revPct = m.revenue > 0 ? Math.max((m.revenue / maxValue) * 100, 5) : 0;
+    const expPct = m.expenses > 0 ? Math.max((m.expenses / maxValue) * 100, 5) : 0;
+    
+    return `
+      <div style="flex:1; display:flex; flex-direction:column; align-items:center; gap:4px; min-width:40px;">
+        <div style="width:100%; height:80px; display:flex; align-items:flex-end; justify-content:center; gap:2px;">
+          <div style="width:8px; height:${revPct}%; background:${m.isCurrent ? '#059669' : '#10b981'}; border-radius:2px 2px 0 0;" title="Revenue: ${fmt.currency(m.revenue)}"></div>
+          <div style="width:8px; height:${expPct}%; background:${m.isCurrent ? '#dc2626' : '#f87171'}; border-radius:2px 2px 0 0;" title="Expenses: ${fmt.currency(m.expenses)}"></div>
+        </div>
+        <span style="font-size:10px; color:${m.isCurrent ? '#334155' : '#94a3b8'}; font-weight:${m.isCurrent ? 'bold' : 'normal'};">${m.label}</span>
+      </div>
+    `;
+  }).join('');
 
   const expBreak = (d.expense_breakdown && Object.keys(d.expense_breakdown).length) ? d.expense_breakdown : expBreakRaw;
-
-  // Sparkline bars
-  const maxBar = Math.max(...trend.map(t => Math.max(t.revenue, t.expenses)), 1);
-  const trendBars = trend.map(t => {
-    const revH = Math.round((t.revenue  / maxBar) * 100);
-    const expH = Math.round((t.expenses / maxBar) * 100);
-    const label = t.month ? t.month.substring(5) : '';
-    const isCurrentMonth = t.month === ym;
-    return `
-      <div class="flex flex-col items-center gap-1 flex-1">
-        <div class="w-full flex items-end justify-center gap-0.5 h-16">
-          <div class="w-3 rounded-t transition-all" style="height:${revH > 0 ? revH : 0}%;background:${isCurrentMonth ? '#059669' : '#10b981'};${revH === 0 ? 'min-height:0' : 'min-height:2px'}" title="Revenue ${fmt.currency(t.revenue)}"></div>
-          <div class="w-3 rounded-t transition-all" style="height:${expH > 0 ? expH : 0}%;background:${isCurrentMonth ? '#dc2626' : '#f87171'};${expH === 0 ? 'min-height:0' : 'min-height:2px'}" title="Expenses ${fmt.currency(t.expenses)}"></div>
-        </div>
-        <span class="text-[10px] font-medium ${isCurrentMonth ? 'text-slate-700 font-bold' : 'text-slate-400'}">${label}</span>
-      </div>`;
-  }).join('');
 
   // Bottom summary always uses current-month computed values (reliable)
   const trendSummary = `
@@ -448,8 +488,8 @@ function renderDashboard(c) {
             <span class="flex items-center gap-1"><span class="w-3 h-1.5 rounded bg-red-400 inline-block"></span>Expenses</span>
           </div>
         </div>
-        <div class="flex items-end gap-1 h-24 px-2">
-          ${trendBars || '<p class="text-xs text-slate-400 m-auto">No trend data yet</p>'}
+        <div style="display:flex; align-items:flex-end; gap:8px; padding:0 8px; height:100px;">
+          ${trendChart}
         </div>
         <div class="mt-3 pt-3 border-t border-slate-100 grid grid-cols-3 gap-3">
           ${trendSummary}
@@ -740,21 +780,30 @@ function renderBills(c) {
           <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide">Bill #</th>
           <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide">Vendor</th>
           <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide hidden md:table-cell">Category</th>
-          <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide hidden md:table-cell">Due Date</th>
-          <th class="text-right px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide">Amount</th>
+          <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide hidden md:table-cell">Next Due</th>
+          <th class="text-right px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide">Total</th>
           <th class="text-right px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide hidden lg:table-cell">Balance</th>
+          <th class="text-right px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide hidden lg:table-cell">Monthly</th>
           <th class="text-center px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide">Status</th>
           <th class="text-center px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide">Actions</th>
         </tr></thead>
         <tbody>
-          ${rows.length ? rows.map(b => `
+          ${rows.length ? rows.map(b => {
+            const isRecurring = b.recurring === 'true' || b.recurring === true;
+            const balance = parseFloat(b.balance_due) || parseFloat(b.amount) || 0;
+            const monthly = parseFloat(b.monthly_payment) || 0;
+            const recurringBadge = isRecurring
+              ? `<span class="ml-1 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-violet-100 text-violet-600"><i class="fas fa-sync-alt text-[8px]"></i> Day ${b.recurring_day||'—'}</span>`
+              : '';
+            return `
             <tr class="border-b border-slate-100 hover:bg-slate-50 transition-colors">
               <td class="px-4 py-3 font-semibold text-slate-800">${b.bill_number || '—'}</td>
-              <td class="px-4 py-3 text-slate-600">${b.vendor || '—'}</td>
+              <td class="px-4 py-3 text-slate-600">${b.vendor || '—'}${recurringBadge}</td>
               <td class="px-4 py-3 text-slate-500 hidden md:table-cell">${b.category || '—'}</td>
               <td class="px-4 py-3 text-slate-500 hidden md:table-cell">${fmt.date(b.due_date)}</td>
               <td class="px-4 py-3 text-right font-bold text-slate-800">${fmt.currency(b.amount)}</td>
-              <td class="px-4 py-3 text-right text-slate-600 hidden lg:table-cell">${fmt.currency(b.balance_due)}</td>
+              <td class="px-4 py-3 text-right hidden lg:table-cell ${balance > 0 ? 'text-red-500 font-semibold' : 'text-slate-400'}">${fmt.currency(balance)}</td>
+              <td class="px-4 py-3 text-right text-slate-500 hidden lg:table-cell">${monthly > 0 ? fmt.currency(monthly)+'/mo' : '—'}</td>
               <td class="px-4 py-3 text-center">${badge(b.status)}</td>
               <td class="px-4 py-3 text-center">
                 <div class="flex items-center justify-center gap-1">
@@ -763,8 +812,9 @@ function renderBills(c) {
                   <button onclick="FinPage._deleteBill('${b.id}')" class="p-1.5 text-red-300 hover:text-red-500 hover:bg-red-50 rounded transition-colors"><i class="fas fa-trash text-xs"></i></button>
                 </div>
               </td>
-            </tr>`).join('') : `
-            <tr><td colspan="8" class="px-4 py-12 text-center text-slate-400">
+            </tr>`;
+          }).join('') : `
+            <tr><td colspan="9" class="px-4 py-12 text-center text-slate-400">
               <i class="fas fa-file-alt text-3xl mb-2 block opacity-30"></i>
               No bills found. <button onclick="showBillModal()" class="text-emerald-600 font-semibold hover:underline">Add one</button>
             </td></tr>`}
@@ -774,7 +824,13 @@ function renderBills(c) {
   </div>`;
 
   window.FinPage._filterBill = (u) => { Object.assign(state.filter.bills, u); renderBills(c); };
-  window.FinPage._payBill    = (id) => showPaymentModal(id, 'bill');
+  window.FinPage._payBill    = (id) => {
+    const b = state.bills.find(r => r.id === id);
+    const isRecurring = b?.recurring === 'true' || b?.recurring === true;
+    const monthlyAmt  = parseFloat(b?.monthly_payment) || 0;
+    // For recurring bills pre-fill the monthly payment amount, not the full balance
+    showPaymentModal(id, 'bill', isRecurring && monthlyAmt > 0 ? monthlyAmt : null);
+  };
   window.FinPage._editBill   = (id) => { const b = state.bills.find(r=>r.id===id); if(b) showBillModal(b); };
   window.FinPage._deleteBill = async (id) => {
     if (!confirm('Delete this bill?')) return;
@@ -786,30 +842,83 @@ function renderBills(c) {
 // BUDGETS
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 function renderBudgets(c) {
-  const bva = state.budgetVA;
-  const lines = bva?.lines || [];
-  const now = new Date();
+  const bva  = state.budgetVA;
+  const now  = new Date();
+  const ym   = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+
+  // Build lines: prefer server data, but always compute actuals locally as fallback
+  // so the table is never blank just because the GAS route isn't set up yet
+  let lines = bva?.lines || [];
+
+  if (!lines.length && state.budgets.length) {
+    // Compute actuals from local expense + bill state for this month
+    const localActuals = {};
+    state.expenses.forEach(e => {
+      if ((e.date||'').startsWith(ym) && e.category) {
+        localActuals[e.category] = (localActuals[e.category]||0) + (parseFloat(e.amount)||0);
+      }
+    });
+    state.bills.forEach(b => {
+      if (((b.issue_date||b.due_date)||'').startsWith(ym) && b.category) {
+        localActuals[b.category] = (localActuals[b.category]||0) + (parseFloat(b.amount)||0);
+      }
+    });
+    lines = state.budgets.map(b => {
+      const actual   = localActuals[b.category] || 0;
+      const budget   = parseFloat(b.budget_amount) || 0;
+      const variance = budget - actual;
+      const pct      = budget > 0 ? (actual / budget) * 100 : 0;
+      const status   = pct > 100 ? 'Over Budget' : pct > 90 ? 'Near Limit' : 'On Track';
+      return { category: b.category, budget, actual, variance, status };
+    });
+  }
+
+  // Unbudgeted categories that have expenses this month (so you know what to budget)
+  const budgetedCats = new Set(lines.map(l => l.category));
+  const unbudgeted   = {};
+  state.expenses.forEach(e => {
+    if ((e.date||'').startsWith(ym) && e.category && !budgetedCats.has(e.category)) {
+      unbudgeted[e.category] = (unbudgeted[e.category]||0) + (parseFloat(e.amount)||0);
+    }
+  });
 
   c.innerHTML = `
-  <div class="p-6 max-w-7xl mx-auto fade-in">
-    <div class="flex items-center justify-between mb-5">
+  <div class="p-6 max-w-7xl mx-auto fade-in space-y-5">
+
+    <!-- How it works explainer -->
+    <div class="bg-blue-50 border border-blue-200 rounded-xl p-4 text-sm text-blue-800">
+      <p class="font-bold mb-1"><i class="fas fa-info-circle mr-1.5"></i>How Budgets Work</p>
+      <p class="text-xs text-blue-700 leading-relaxed">
+        Set a spending limit per <strong>expense category</strong> for the current month (e.g. Rent & Utilities: $2,000).
+        The <strong>Actual</strong> column fills in automatically from your logged expenses.
+        <strong>Variance</strong> shows how much budget you have left (green) or have gone over (red).
+        Budgets are per-month — you'll need to set them each month, or copy them forward.
+      </p>
+    </div>
+
+    <div class="flex items-center justify-between">
       <h2 class="text-base font-bold text-slate-800">
         Budget vs Actual — ${now.toLocaleString('default',{month:'long'})} ${now.getFullYear()}
       </h2>
+      <button onclick="showBudgetModal()" class="flex items-center gap-1.5 px-3 py-2 bg-emerald-500 text-white text-xs font-semibold rounded-lg hover:bg-emerald-600 transition-colors">
+        <i class="fas fa-plus text-xs"></i>Set Budget
+      </button>
     </div>
+
+    ${lines.length ? `
     <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
       <table class="w-full text-sm">
         <thead><tr class="bg-slate-50 border-b border-slate-200">
           <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide">Category</th>
           <th class="text-right px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide">Budget</th>
           <th class="text-right px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide">Actual</th>
-          <th class="text-right px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide">Variance</th>
-          <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide">Progress</th>
+          <th class="text-right px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide">Remaining</th>
+          <th class="text-left px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide w-36">Usage</th>
           <th class="text-center px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide">Status</th>
           <th class="text-center px-4 py-3 text-xs font-bold text-slate-500 uppercase tracking-wide">Actions</th>
         </tr></thead>
         <tbody>
-          ${lines.length ? lines.map(l => {
+          ${lines.map(l => {
             const pct = l.budget > 0 ? Math.min(100, Math.round((l.actual/l.budget)*100)) : 0;
             const barColor = pct > 100 ? 'bg-red-500' : pct > 90 ? 'bg-amber-400' : 'bg-emerald-400';
             return `
@@ -817,8 +926,10 @@ function renderBudgets(c) {
                 <td class="px-4 py-3 font-medium text-slate-800">${l.category}</td>
                 <td class="px-4 py-3 text-right text-slate-600">${fmt.currency(l.budget)}</td>
                 <td class="px-4 py-3 text-right font-semibold text-slate-800">${fmt.currency(l.actual)}</td>
-                <td class="px-4 py-3 text-right font-semibold ${l.variance >= 0 ? 'text-emerald-600':'text-red-500'}">${l.variance >= 0 ? '+':'-'}${fmt.currency(Math.abs(l.variance))}</td>
-                <td class="px-4 py-3 w-32">
+                <td class="px-4 py-3 text-right font-semibold ${l.variance >= 0 ? 'text-emerald-600':'text-red-500'}">
+                  ${l.variance >= 0 ? '+' : ''}${fmt.currency(l.variance)}
+                </td>
+                <td class="px-4 py-3 w-36">
                   <div class="flex items-center gap-2">
                     <div class="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden">
                       <div class="${barColor} h-full rounded-full transition-all" style="width:${pct}%"></div>
@@ -828,17 +939,47 @@ function renderBudgets(c) {
                 </td>
                 <td class="px-4 py-3 text-center">${badge(l.status)}</td>
                 <td class="px-4 py-3 text-center">
-                  <button onclick="FinPage._editBudget('${l.category}')" class="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors"><i class="fas fa-edit text-xs"></i></button>
+                  <button onclick="FinPage._editBudget('${l.category}')" class="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors">
+                    <i class="fas fa-edit text-xs"></i>
+                  </button>
                 </td>
               </tr>`;
-          }).join('') : `
-            <tr><td colspan="7" class="px-4 py-12 text-center text-slate-400">
-              <i class="fas fa-wallet text-3xl mb-2 block opacity-30"></i>
-              No budgets set. <button onclick="showBudgetModal()" class="text-emerald-600 font-semibold hover:underline">Set a budget</button>
-            </td></tr>`}
+          }).join('')}
         </tbody>
       </table>
-    </div>
+    </div>` : `
+    <div class="bg-white rounded-xl border border-slate-200 p-12 text-center">
+      <i class="fas fa-wallet text-4xl text-slate-200 mb-3 block"></i>
+      <p class="font-semibold text-slate-600 mb-1">No budgets set for this month</p>
+      <p class="text-sm text-slate-400 mb-4">Click "Set Budget" to set a spending limit for any expense category.<br>
+      Example: set Rent & Utilities to $2,000 — it will track against your actual logged expenses automatically.</p>
+      <button onclick="showBudgetModal()" class="px-4 py-2 bg-emerald-500 text-white text-sm font-semibold rounded-lg hover:bg-emerald-600 transition-colors">
+        <i class="fas fa-plus mr-2"></i>Set Your First Budget
+      </button>
+    </div>`}
+
+    <!-- Unbudgeted spending this month -->
+    ${Object.keys(unbudgeted).length ? `
+    <div class="bg-white rounded-xl border border-amber-200 p-5">
+      <h3 class="font-bold text-slate-800 text-sm mb-3 flex items-center gap-2">
+        <i class="fas fa-exclamation-circle text-amber-500 text-sm"></i>
+        Unbudgeted Spending This Month
+        <span class="text-xs font-normal text-slate-400">— categories with expenses but no budget set</span>
+      </h3>
+      <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
+        ${Object.entries(unbudgeted).sort((a,b)=>b[1]-a[1]).map(([cat, amt]) => `
+          <div class="flex items-center justify-between p-3 bg-amber-50 border border-amber-100 rounded-lg">
+            <span class="text-xs font-medium text-slate-700 truncate">${cat}</span>
+            <div class="flex items-center gap-2 ml-2 flex-shrink-0">
+              <span class="text-xs font-bold text-amber-700">${fmt.currency(amt)}</span>
+              <button onclick="showBudgetModal({category:'${cat}'})" class="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded hover:bg-emerald-100 transition-colors">
+                + Budget
+              </button>
+            </div>
+          </div>`).join('')}
+      </div>
+    </div>` : ''}
+
   </div>`;
 
   window.FinPage._editBudget = (category) => {
@@ -899,7 +1040,25 @@ function renderReports(c) {
           if (maintTotal > 0)   expBreakdown['Asset Maintenance'] = (expBreakdown['Asset Maintenance']||0) + maintTotal;
           if (taskTotal > 0)    expBreakdown['Task Costs']        = (expBreakdown['Task Costs']||0) + taskTotal;
 
-          return reportLine('Total Revenue', fmt.currency(baseRevenue), 'font-semibold text-emerald-600')
+          // Revenue breakdown by source
+          const revBreakdown = { ...(is.revenue_breakdown || {}) };
+          if (!Object.keys(revBreakdown).length) {
+            state.invoices.forEach(inv => {
+              const key = inv.customer || 'Uncategorised';
+              revBreakdown[key] = (revBreakdown[key] || 0) + (parseFloat(inv.total) || 0);
+            });
+          }
+          const revLines = Object.entries(revBreakdown).sort((a,b) => b[1]-a[1])
+            .map(([src, amt]) => reportLine(src, fmt.currency(amt), 'text-slate-600')).join('');
+
+          const revenueSection = collapsibleSection(
+            `Revenue (${Object.keys(revBreakdown).length} sources)`,
+            revLines,
+            false
+          );
+
+          return revenueSection
+            + reportLine('Total Revenue', fmt.currency(baseRevenue), 'font-semibold text-emerald-600')
             + '<div class="h-px bg-slate-100 my-2"></div>'
             + '<p class="text-xs font-bold text-slate-400 uppercase tracking-wide mb-1">Operating Expenses</p>'
             + Object.entries(expBreakdown).map(([cat, amt]) => reportLine(cat, fmt.currency(amt), 'text-slate-600')).join('')
@@ -947,12 +1106,22 @@ function renderReports(c) {
         </span>
         Cash Flow Statement
       </h3>
+      ${(()=>{
+        // If server didn't return cashflow inflows, compute from invoices (Paid + Sent = received/expected)
+        const invoiceInflow = state.invoices
+          .filter(inv => inv.status === 'Paid' || inv.status === 'Partial' || inv.status === 'Sent')
+          .reduce((s, inv) => s + (parseFloat(inv.status === 'Partial' ? (inv.total - (inv.balance_due||0)) : inv.total) || 0), 0);
+        const localOutflow = state.expenses.reduce((s,e)=>s+(parseFloat(e.amount)||0),0) + state.bills.filter(b=>b.status==='Paid').reduce((s,b)=>s+(parseFloat(b.amount)||0),0);
+        const cfInflow  = (cf.operating?.inflow  != null && cf.operating.inflow  !== '') ? parseFloat(cf.operating.inflow)  : invoiceInflow;
+        const cfOutflow = (cf.operating?.outflow != null && cf.operating.outflow !== '') ? parseFloat(cf.operating.outflow) : localOutflow;
+        const cfNet     = cfInflow - cfOutflow;
+        return `
       <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
         <div>
           <p class="text-xs font-bold text-slate-400 uppercase tracking-wide mb-2">Operating Activities</p>
-          ${reportLine('Inflows', fmt.currency(cf.operating?.inflow), 'text-emerald-600')}
-          ${reportLine('Outflows', fmt.currency(cf.operating?.outflow), 'text-red-500')}
-          ${reportLine('Net Operating', fmt.currency(cf.operating?.net), 'font-bold text-slate-800')}
+          ${reportLine('Inflows (Invoices & Receipts)', fmt.currency(cfInflow), 'text-emerald-600')}
+          ${reportLine('Outflows (Expenses & Bills)', fmt.currency(cfOutflow), 'text-red-500')}
+          ${reportLine('Net Operating', fmt.currency(cfNet), 'font-bold text-slate-800')}
         </div>
         <div>
           <p class="text-xs font-bold text-slate-400 uppercase tracking-wide mb-2">Investing Activities</p>
@@ -962,13 +1131,24 @@ function renderReports(c) {
           <p class="text-xs font-bold text-slate-400 uppercase tracking-wide mb-2">Financing Activities</p>
           ${reportLine('Net Financing', fmt.currency(cf.financing?.net), 'font-bold text-slate-800')}
         </div>
-      </div>
-      <div class="mt-4 pt-4 border-t border-slate-100">
-        ${reportLine('Net Cash Flow', fmt.currency(cf.net_cash_flow), `font-extrabold text-lg ${(cf.net_cash_flow||0) >= 0 ? 'text-emerald-600' : 'text-red-500'}`)}
-      </div>
+      </div>`;
+      })()}
+      ${(()=>{
+        const invoiceInflow2 = state.invoices
+          .filter(inv => inv.status === 'Paid' || inv.status === 'Partial' || inv.status === 'Sent')
+          .reduce((s, inv) => s + (parseFloat(inv.status === 'Partial' ? (inv.total - (inv.balance_due||0)) : inv.total) || 0), 0);
+        const localOutflow2 = state.expenses.reduce((s,e)=>s+(parseFloat(e.amount)||0),0) + state.bills.filter(b=>b.status==='Paid').reduce((s,b)=>s+(parseFloat(b.amount)||0),0);
+        const cfInflow2  = (cf.operating?.inflow  != null && cf.operating.inflow  !== '') ? parseFloat(cf.operating.inflow)  : invoiceInflow2;
+        const cfOutflow2 = (cf.operating?.outflow != null && cf.operating.outflow !== '') ? parseFloat(cf.operating.outflow) : localOutflow2;
+        const cfNet2     = cfInflow2 - cfOutflow2;
+        const netCashFlow = cfNet2 + (parseFloat(cf.investing?.net) || 0) + (parseFloat(cf.financing?.net) || 0);
+        return `<div class="mt-4 pt-4 border-t border-slate-100">
+          ${reportLine('Net Cash Flow', fmt.currency(netCashFlow), `font-extrabold text-lg ${netCashFlow >= 0 ? 'text-emerald-600' : 'text-red-500'}`)}
+        </div>`;
+      })()}
     </div>
 
-    <!-- Bills Summary -->
+        <!-- Bills Summary -->
     <div class="bg-white rounded-xl border border-slate-200 p-6">
       <h3 class="font-extrabold text-slate-800 text-base mb-4 flex items-center gap-2">
         <span class="w-7 h-7 bg-amber-100 rounded-lg flex items-center justify-center">
@@ -986,12 +1166,18 @@ function renderReports(c) {
           const byVendor  = {};
           bills.forEach(b=>{ if(b.vendor){ byVendor[b.vendor]=(byVendor[b.vendor]||0)+(parseFloat(b.amount)||0); } });
           const topVendors = Object.entries(byVendor).sort((a,b)=>b[1]-a[1]).slice(0,5);
+          
+          const vendorSection = topVendors.length ? collapsibleSection(
+            `Top Vendors (${topVendors.length})`,
+            topVendors.map(([v,a])=>reportLine(v,fmt.currency(a),'text-slate-600')).join(''),
+            false
+          ) : '';
+          
           return reportLine('Total Bills',fmt.currency(total),'font-semibold text-slate-700')
             + reportLine('Paid',fmt.currency(paid),'text-emerald-600')
             + reportLine('Outstanding',fmt.currency(unpaid),'text-amber-600')
             + reportLine('Overdue',fmt.currency(overdue),'font-semibold text-red-500')
-            + (topVendors.length ? '<div class="h-px bg-slate-100 my-2"></div><p class="text-xs font-bold text-slate-400 uppercase tracking-wide mb-1">Top Vendors</p>'
-              + topVendors.map(([v,a])=>reportLine(v,fmt.currency(a),'text-slate-600')).join('') : '');
+            + (topVendors.length ? '<div class="h-px bg-slate-100 my-2"></div>' + vendorSection : '');
         })()}
       </div>
     </div>
@@ -1092,52 +1278,194 @@ function reportLine(label, value, cls = '') {
     </div>`;
 }
 
+function collapsibleSection(title, content, defaultOpen = true) {
+  // Use a deterministic ID based on title to avoid duplicates on re-renders
+  const id = 'collapsible-' + title.toLowerCase().replace(/[^a-z0-9]/g, '-');
+  return `
+    <div style="margin-bottom:8px;">
+      <div class="collapsible-header" onclick="window.toggleCollapsibleSection('${id}', this)" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;padding:8px 0;user-select:none;">
+        <span style="font-size:11px;font-weight:700;color:#64748b;text-transform:uppercase;letter-spacing:0.05em;">${title}</span>
+        <i class="fas fa-chevron-right collapsible-icon ${defaultOpen ? 'open' : ''}" style="transition:transform 0.2s;font-size:12px;color:#64748b;${defaultOpen ? 'transform:rotate(90deg);' : ''}"></i>
+      </div>
+      <div id="${id}" class="collapsible-content" style="padding-left:12px;border-left:2px solid #e2e8f0;overflow:hidden;transition:max-height 0.3s ease-out;${defaultOpen ? 'max-height:500px;' : 'max-height:0;'}">
+        ${content}
+      </div>
+    </div>`;
+}
+
+// Define globally once - check if already defined to avoid re-creating
+if (!window.toggleCollapsibleSection) {
+  window.toggleCollapsibleSection = function(id, header) {
+    const content = document.getElementById(id);
+    const icon = header.querySelector('.collapsible-icon');
+    if (!content || !icon) return;
+    
+    const isExpanded = content.style.maxHeight !== '0px' && content.style.maxHeight !== '';
+    
+    if (isExpanded) {
+      content.style.maxHeight = '0px';
+      icon.style.transform = 'rotate(0deg)';
+    } else {
+      content.style.maxHeight = '500px';
+      icon.style.transform = 'rotate(90deg)';
+    }
+  };
+}
+  
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// ACCOUNTS (Chart of Accounts)
+// ACCOUNTS
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 function renderAccounts(c) {
-  const typeOrder = ['Asset','Liability','Equity','Revenue','Expense'];
+  const typeOrder  = ['Asset','Liability','Equity','Revenue','Expense'];
+  const typeColors = {
+    Asset:     'bg-blue-50 text-blue-700 border-blue-200',
+    Liability: 'bg-red-50 text-red-700 border-red-200',
+    Equity:    'bg-violet-50 text-violet-700 border-violet-200',
+    Revenue:   'bg-emerald-50 text-emerald-700 border-emerald-200',
+    Expense:   'bg-amber-50 text-amber-700 border-amber-200',
+  };
+  const typeIcons = {
+    Asset: 'fa-university', Liability: 'fa-credit-card',
+    Equity: 'fa-scale-balanced', Revenue: 'fa-arrow-trend-up', Expense: 'fa-arrow-trend-down',
+  };
+
+  // Check if ANY invoices have a deposit_account assigned yet
+  const anyInvoiceAssigned = state.invoices.some(i => i.deposit_account && i.deposit_account !== '');
+  const anyExpenseAssigned = state.expenses.some(e => e.paid_from && e.paid_from !== '');
+  const anyBillAssigned    = state.bills.some(b => b.paid_from && b.paid_from !== '');
+
+  // Compute activity per account name from live transaction data
+  function accountActivity(accountName) {
+    // If no invoices have deposit_account set yet, distribute all invoice revenue
+    // to the first Asset account (so the dashboard shows something useful)
+    const assetAccounts = state.accounts.filter(a => a.type === 'Asset' && a.is_active !== 'false');
+    const isFirstAsset  = !anyInvoiceAssigned && assetAccounts.length > 0 && assetAccounts[0].account_name === accountName;
+
+    const invoiceIn = anyInvoiceAssigned
+      ? state.invoices.filter(i => i.deposit_account === accountName).reduce((s,i) => s + (parseFloat(i.total)||0), 0)
+      : (isFirstAsset ? state.invoices.reduce((s,i) => s + (parseFloat(i.total)||0), 0) : 0);
+
+    const expenseOut = anyExpenseAssigned
+      ? state.expenses.filter(e => e.paid_from === accountName).reduce((s,e) => s + (parseFloat(e.amount)||0), 0)
+      : 0;
+
+    const billOut = anyBillAssigned
+      ? state.bills.filter(b => b.paid_from === accountName && b.status === 'Paid').reduce((s,b) => s + (parseFloat(b.amount)||0), 0)
+      : 0;
+
+    return { invoiceIn, expenseOut, billOut, net: invoiceIn - expenseOut - billOut };
+  }
+
   const grouped = {};
   typeOrder.forEach(t => grouped[t] = []);
   state.accounts.forEach(a => { if (grouped[a.type]) grouped[a.type].push(a); });
-  const typeColors = { Asset:'bg-blue-50 text-blue-700', Liability:'bg-red-50 text-red-700', Equity:'bg-violet-50 text-violet-700', Revenue:'bg-emerald-50 text-emerald-700', Expense:'bg-amber-50 text-amber-700' };
+
+  // Summary bar — totals across Asset accounts
+  const assetAccounts = grouped['Asset'] || [];
+  const totalInflows  = assetAccounts.reduce((s,a) => s + accountActivity(a.account_name).invoiceIn, 0);
+  const totalOutflows = assetAccounts.reduce((s,a) => {
+    const act = accountActivity(a.account_name);
+    return s + act.expenseOut + act.billOut;
+  }, 0);
 
   c.innerHTML = `
-  <div class="p-6 max-w-5xl mx-auto fade-in space-y-4">
+  <div class="p-6 max-w-5xl mx-auto fade-in space-y-5">
+
+    <!-- Unassigned warning — shown when invoices/expenses haven't been linked to accounts yet -->
+    ${(!anyInvoiceAssigned && state.invoices.length > 0) ? `
+    <div class="flex items-start gap-3 p-4 bg-amber-50 border border-amber-200 rounded-xl text-sm text-amber-800">
+      <i class="fas fa-exclamation-triangle text-amber-500 mt-0.5 flex-shrink-0"></i>
+      <div>
+        <p class="font-semibold">Your invoices aren't linked to an account yet.</p>
+        <p class="text-xs mt-1 text-amber-700">Edit each invoice and pick a "Deposit To Account" so the inflows show on the correct account. For now, all invoice revenue is shown on your first Asset account as a placeholder.</p>
+      </div>
+    </div>` : ''}
+    ${(!anyExpenseAssigned && state.expenses.length > 0) ? `
+    <div class="flex items-start gap-3 p-4 bg-blue-50 border border-blue-200 rounded-xl text-sm text-blue-800">
+      <i class="fas fa-info-circle text-blue-500 mt-0.5 flex-shrink-0"></i>
+      <div>
+        <p class="font-semibold">Expenses aren't linked to an account yet.</p>
+        <p class="text-xs mt-1 text-blue-700">Edit each expense and pick a "Paid From Account" so outflows are tracked per account.</p>
+      </div>
+    </div>` : ''}
+
+    <!-- Summary strip -->
+    <div class="grid grid-cols-3 gap-4">
+      <div class="bg-white rounded-xl border border-slate-200 p-4">
+        <p class="text-xs font-bold text-slate-400 uppercase tracking-wide">Total Inflows</p>
+        <p class="text-xl font-extrabold text-emerald-600 mt-1">${fmt.currency(totalInflows)}</p>
+        <p class="text-[11px] text-slate-400 mt-0.5">${anyInvoiceAssigned ? 'From invoices → assigned accounts' : 'All invoices (none assigned yet)'}</p>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 p-4">
+        <p class="text-xs font-bold text-slate-400 uppercase tracking-wide">Total Outflows</p>
+        <p class="text-xl font-extrabold text-red-500 mt-1">${fmt.currency(totalOutflows)}</p>
+        <p class="text-[11px] text-slate-400 mt-0.5">${anyExpenseAssigned ? 'Expenses + paid bills' : 'Assign expenses to see per-account'}</p>
+      </div>
+      <div class="bg-white rounded-xl border border-slate-200 p-4">
+        <p class="text-xs font-bold text-slate-400 uppercase tracking-wide">Net Position</p>
+        <p class="text-xl font-extrabold ${totalInflows - totalOutflows >= 0 ? 'text-blue-600' : 'text-red-500'} mt-1">${fmt.currency(totalInflows - totalOutflows)}</p>
+        <p class="text-[11px] text-slate-400 mt-0.5">Inflows minus outflows</p>
+      </div>
+    </div>
+
+    <!-- Account cards -->
     ${typeOrder.map(type => {
       const rows = grouped[type] || [];
       if (!rows.length) return '';
       return `
-        <div class="bg-white rounded-xl border border-slate-200 overflow-hidden">
-          <div class="px-4 py-3 border-b border-slate-100 flex items-center justify-between bg-slate-50">
-            <h3 class="font-bold text-slate-800 text-sm flex items-center gap-2">
-              <span class="px-2 py-0.5 rounded-full text-xs font-bold ${typeColors[type]}">${type}</span>
-              <span class="text-slate-500 font-normal">${rows.length} account${rows.length !== 1 ? 's' : ''}</span>
-            </h3>
+        <div>
+          <div class="flex items-center gap-2 mb-3">
+            <span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold border ${typeColors[type]}">
+              <i class="fas ${typeIcons[type]} text-[10px]"></i>${type}
+            </span>
+            <span class="text-xs text-slate-400">${rows.length} account${rows.length !== 1 ? 's' : ''}</span>
           </div>
-          <table class="w-full text-sm">
-            <tbody>
-              ${rows.map(a => `
-                <tr class="border-b border-slate-50 last:border-0 hover:bg-slate-50 transition-colors">
-                  <td class="px-4 py-3 font-mono text-xs text-slate-400 w-20">${a.account_number}</td>
-                  <td class="px-4 py-3 font-semibold text-slate-800">${a.account_name}</td>
-                  <td class="px-4 py-3 text-slate-500 hidden md:table-cell">${a.category}</td>
-                  <td class="px-4 py-3 text-slate-400 hidden lg:table-cell text-xs truncate max-w-xs">${a.description || '—'}</td>
-                  <td class="px-4 py-3 text-center">
-                    ${a.is_active !== 'false' ? '<span class="text-xs text-emerald-600 font-semibold">Active</span>' : '<span class="text-xs text-slate-400">Inactive</span>'}
-                  </td>
-                  <td class="px-4 py-3 text-center">
-                    <div class="flex items-center justify-center gap-1">
-                      <button onclick="FinPage._editAcc('${a.id}')" class="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors"><i class="fas fa-edit text-xs"></i></button>
-                      <button onclick="FinPage._deleteAcc('${a.id}')" class="p-1.5 text-red-300 hover:text-red-500 hover:bg-red-50 rounded transition-colors"><i class="fas fa-trash text-xs"></i></button>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+            ${rows.map(a => {
+              const act = accountActivity(a.account_name);
+              const hasActivity = act.invoiceIn > 0 || act.expenseOut > 0 || act.billOut > 0;
+              return `
+                <div class="bg-white rounded-xl border border-slate-200 p-4 hover:border-slate-300 transition-colors">
+                  <div class="flex items-start justify-between mb-3">
+                    <div>
+                      <p class="font-bold text-slate-800 text-sm">${a.account_name}</p>
+                      <p class="text-xs text-slate-400 mt-0.5">${a.account_number ? '#' + a.account_number + ' · ' : ''}${a.category || a.type}</p>
                     </div>
-                  </td>
-                </tr>`).join('')}
-            </tbody>
-          </table>
+                    <div class="flex items-center gap-1">
+                      ${a.is_active !== 'false'
+                        ? '<span class="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full">Active</span>'
+                        : '<span class="text-[10px] font-bold text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">Inactive</span>'}
+                      <button onclick="FinPage._editAcc('${a.id}')" class="p-1.5 text-slate-300 hover:text-slate-600 hover:bg-slate-100 rounded transition-colors"><i class="fas fa-edit text-xs"></i></button>
+                      <button onclick="FinPage._deleteAcc('${a.id}')" class="p-1.5 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded transition-colors"><i class="fas fa-trash text-xs"></i></button>
+                    </div>
+                  </div>
+                  ${hasActivity ? `
+                  <div class="space-y-1 border-t border-slate-100 pt-3">
+                    ${act.invoiceIn  > 0 ? `<div class="flex justify-between text-xs"><span class="text-slate-500">Invoice deposits</span><span class="font-semibold text-emerald-600">+${fmt.currency(act.invoiceIn)}</span></div>` : ''}
+                    ${act.expenseOut > 0 ? `<div class="flex justify-between text-xs"><span class="text-slate-500">Expenses paid</span><span class="font-semibold text-red-500">−${fmt.currency(act.expenseOut)}</span></div>` : ''}
+                    ${act.billOut    > 0 ? `<div class="flex justify-between text-xs"><span class="text-slate-500">Bills paid</span><span class="font-semibold text-red-500">−${fmt.currency(act.billOut)}</span></div>` : ''}
+                    <div class="flex justify-between text-xs pt-1 border-t border-slate-100">
+                      <span class="font-bold text-slate-600">Net</span>
+                      <span class="font-extrabold ${act.net >= 0 ? 'text-blue-600' : 'text-red-500'}">${act.net >= 0 ? '+' : ''}${fmt.currency(act.net)}</span>
+                    </div>
+                  </div>` : `
+                  <p class="text-[11px] text-slate-300 border-t border-slate-100 pt-2 mt-1">No transactions linked yet — assign this account in invoices, expenses or bills.</p>`}
+                  ${a.description ? `<p class="text-[11px] text-slate-400 mt-2">${a.description}</p>` : ''}
+                </div>`;
+            }).join('')}
+          </div>
         </div>`;
     }).join('')}
-    ${!state.accounts.length ? `<div class="text-center py-12 text-slate-400"><i class="fas fa-list text-3xl mb-2 block opacity-30"></i>No accounts found. They are created automatically on first install.</div>` : ''}
+
+    ${!state.accounts.length ? `
+      <div class="text-center py-16 text-slate-400">
+        <i class="fas fa-university text-4xl mb-3 block opacity-20"></i>
+        <p class="font-semibold text-slate-500 mb-1">No accounts set up yet</p>
+        <p class="text-sm mb-4">Add your bank accounts, credit cards and cash accounts. Then assign them when creating invoices, expenses and bills.</p>
+        <button onclick="showAccountModal()" class="px-4 py-2 bg-emerald-500 text-white text-sm font-semibold rounded-lg hover:bg-emerald-600 transition-colors">
+          <i class="fas fa-plus mr-2"></i>Add First Account
+        </button>
+      </div>` : ''}
   </div>`;
 
   window.FinPage._editAcc = (id) => { const a = state.accounts.find(r=>r.id===id); if(a) showAccountModal(a); };
@@ -1202,6 +1530,37 @@ function getForm(id) {
   return Object.fromEntries(new FormData(form).entries());
 }
 
+// Build account <option> list from state.accounts, filtered by type(s)
+// Falls back to sensible defaults if no accounts are set up yet
+function accountOptions(selectedName = '', types = null) {
+  const accounts = state.accounts.filter(a =>
+    a.is_active !== 'false' && (!types || types.includes(a.type))
+  );
+  const fallback = [
+    { account_name: 'Cash & Bank',       type: 'Asset' },
+    { account_name: 'Business Checking', type: 'Asset' },
+    { account_name: 'Business Savings',  type: 'Asset' },
+    { account_name: 'Credit Card',       type: 'Liability' },
+    { account_name: 'Petty Cash',        type: 'Asset' },
+  ];
+  const list = accounts.length ? accounts : fallback;
+  return list.map(a => {
+    const name = a.account_name;
+    return `<option value="${name}" ${name === selectedName ? 'selected' : ''}>${name}${a.type ? ' — ' + a.type : ''}</option>`;
+  }).join('');
+}
+
+function accountSel(label, name, selectedName = '', types = null) {
+  return `
+    <div>
+      <label class="block text-xs font-semibold text-slate-600 mb-1">${label}</label>
+      <select name="${name}" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500 outline-none bg-white">
+        <option value="">— Select Account —</option>
+        ${accountOptions(selectedName, types)}
+      </select>
+    </div>`;
+}
+
 // Normalize any date string to YYYY-MM-DD for <input type="date"> value attributes
 function dateVal(s) {
   if (!s) return '';
@@ -1237,6 +1596,7 @@ function showInvoiceModal(inv = null) {
       <div id="inv-tax-preview" class="text-xs text-slate-500 -mt-1 px-1"></div>
       ${field('Total ($)', 'total', 'number', inv?.total, 'step="0.01" min="0" readonly style="background:#f8fafc;cursor:default"')}
       ${sel('Status', 'status', ['Draft','Sent','Unpaid','Paid'], inv?.status || 'Draft')}
+      ${accountSel('Deposit To Account', 'deposit_account', inv?.deposit_account || '', ['Asset'])}
       <div>
         <label class="block text-xs font-semibold text-slate-600 mb-1">Notes</label>
         <textarea name="notes" rows="2" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500 outline-none bg-white">${inv?.notes || ''}</textarea>
@@ -1261,6 +1621,7 @@ function showInvoiceModal(inv = null) {
       closeModal();
       await loadInvoices();
       const c = document.getElementById('fin-content'); if(c) renderInvoices(c);
+      refreshLinkedTabs();
     } catch(e) { toast(e.message,'error'); }
   };
 
@@ -1292,7 +1653,7 @@ function showExpenseModal(exp = null) {
       ${field('Description', 'description', 'text', exp?.description)}
       <div class="grid grid-cols-2 gap-3">
         ${field('Amount ($)', 'amount', 'number', exp?.amount, 'step="0.01" min="0"')}
-        ${field('Paid From', 'paid_from', 'text', exp?.paid_from || 'Cash & Bank')}
+        ${accountSel('Paid From Account', 'paid_from', exp?.paid_from || '', ['Asset','Liability'])}
       </div>
       ${sel('Status', 'status', ['Pending','Approved','Rejected'], exp?.status || 'Pending')}
     </form>`,
@@ -1309,6 +1670,7 @@ function showExpenseModal(exp = null) {
       closeModal();
       await loadExpenses();
       const c = document.getElementById('fin-content'); if(c) renderExpenses(c);
+      refreshLinkedTabs();
     } catch(e) { toast(e.message,'error'); }
   };
 }
@@ -1316,6 +1678,7 @@ function showExpenseModal(exp = null) {
 // Bill Modal
 function showBillModal(bill = null) {
   const today = new Date().toISOString().split('T')[0];
+  const isRecurring = bill?.recurring === 'true' || bill?.recurring === true;
   modal(
     bill ? 'Edit Bill' : 'New Bill',
     `<form id="bill-form" class="space-y-3">
@@ -1326,7 +1689,59 @@ function showBillModal(bill = null) {
         ${field('Due Date', 'due_date', 'date', dateVal(bill?.due_date))}
       </div>
       ${sel('Category', 'category', EXP_CATS, bill?.category || EXP_CATS[0])}
-      ${field('Amount ($)', 'amount', 'number', bill?.amount, 'step="0.01" min="0"')}
+      ${accountSel('Pay From Account', 'paid_from', bill?.paid_from || '', ['Asset','Liability'])}
+
+      <!-- Total amount & balance -->
+      <div class="grid grid-cols-2 gap-3">
+        ${field('Total Bill Amount ($)', 'amount', 'number', bill?.amount, 'step="0.01" min="0" oninput="FinPage._syncBillBalance()"')}
+        <div>
+          <label class="block text-xs font-semibold text-slate-600 mb-1">Balance Due ($)</label>
+          <input type="number" name="balance_due" step="0.01" min="0"
+            value="${bill?.balance_due ?? bill?.amount ?? ''}"
+            class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500 outline-none bg-white">
+          <p class="text-[10px] text-slate-400 mt-0.5">Remaining balance — auto-filled from total, reduces with each payment.</p>
+        </div>
+      </div>
+
+      <!-- Recurring toggle -->
+      <div class="p-3 bg-slate-50 rounded-lg border border-slate-200">
+        <label class="flex items-center gap-3 cursor-pointer">
+          <input type="checkbox" name="recurring" id="bill-recurring-toggle" value="true"
+            ${isRecurring ? 'checked' : ''}
+            onchange="FinPage._toggleRecurring(this.checked)"
+            class="w-4 h-4 accent-violet-600 rounded">
+          <div>
+            <span class="text-sm font-semibold text-slate-700">Recurring Monthly Bill</span>
+            <p class="text-[11px] text-slate-400">Auto-due every month on a set day. Balance reduces by monthly payment each time Pay is clicked.</p>
+          </div>
+        </label>
+      </div>
+
+      <!-- Recurring options — shown only when toggle is on -->
+      <div id="bill-recurring-opts" class="${isRecurring ? '' : 'hidden'} space-y-3 pl-1">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-semibold text-slate-600 mb-1">Monthly Payment Amount ($)</label>
+            <input type="number" name="monthly_payment" step="0.01" min="0"
+              value="${bill?.monthly_payment || ''}"
+              placeholder="e.g. 100.00"
+              class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-violet-500 outline-none bg-white">
+            <p class="text-[10px] text-slate-400 mt-0.5">Amount deducted from balance each month.</p>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-slate-600 mb-1">Due Day of Month</label>
+            <input type="number" name="recurring_day" min="1" max="31"
+              value="${bill?.recurring_day || ''}"
+              placeholder="e.g. 15"
+              class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-violet-500 outline-none bg-white">
+            <p class="text-[10px] text-slate-400 mt-0.5">Bill re-activates on this day each month.</p>
+          </div>
+        </div>
+        ${bill?.recurring_day ? `<p class="text-xs text-violet-600 bg-violet-50 border border-violet-200 rounded-lg px-3 py-2">
+          <i class="fas fa-sync-alt mr-1"></i>Next due date will be automatically set to day <strong>${bill.recurring_day}</strong> of next month when marked paid.
+        </p>` : ''}
+      </div>
+
       ${sel('Status', 'status', ['Unpaid','Partial','Paid','Overdue'], bill?.status || 'Unpaid')}
       <div>
         <label class="block text-xs font-semibold text-slate-600 mb-1">Notes</label>
@@ -1337,34 +1752,69 @@ function showBillModal(bill = null) {
      <button onclick="FinPage._saveBill(${bill ? `'${bill.id}'` : 'null'})" class="btn-primary" style="background:#10b981">${bill ? 'Save' : 'Add Bill'}</button>`
   );
 
+  // Sync balance_due to match amount when amount changes and balance_due is empty
+  window.FinPage._syncBillBalance = () => {
+    const amt = document.querySelector('#bill-form [name=amount]')?.value;
+    const bal = document.querySelector('#bill-form [name=balance_due]');
+    if (bal && !bal.value) bal.value = amt;
+  };
+
+  // Show/hide recurring options
+  window.FinPage._toggleRecurring = (on) => {
+    const opts = document.getElementById('bill-recurring-opts');
+    if (opts) opts.classList.toggle('hidden', !on);
+  };
+
   window.FinPage._saveBill = async (id) => {
     const data = getForm('bill-form');
     if (!data.vendor) { toast('Vendor is required','error'); return; }
+
+    // Ensure balance_due defaults to amount on creation
+    if (!id && (!data.balance_due || parseFloat(data.balance_due) === 0)) {
+      data.balance_due = data.amount;
+    }
+
+    // If recurring checkbox is unchecked it won't appear in getForm — default to false
+    if (!data.recurring) data.recurring = 'false';
+
     try {
       if (id) { data.id = id; await api('financials/bills/update', data); toast('Updated','success'); }
       else { await api('financials/bills/create', data); toast('Bill added','success'); }
       closeModal();
       await loadBills();
       const c = document.getElementById('fin-content'); if(c) renderBills(c);
+      refreshLinkedTabs();
     } catch(e) { toast(e.message,'error'); }
   };
 }
 
 // Payment Modal
-function showPaymentModal(refId, refType = 'bill') {
+function showPaymentModal(refId, refType = 'bill', overrideAmount = null) {
   const today = new Date().toISOString().split('T')[0];
   const ref = refType === 'bill' ? state.bills.find(r => r.id === refId) : state.invoices.find(r => r.id === refId);
+  const isRecurring = refType === 'bill' && (ref?.recurring === 'true' || ref?.recurring === true);
+  const payAmt = overrideAmount ?? ref?.balance_due ?? '';
+  const balance = parseFloat(ref?.balance_due) || parseFloat(ref?.amount) || 0;
+  const monthly = parseFloat(ref?.monthly_payment) || 0;
+
   modal(
     'Record Payment',
     `<form id="pay-form" class="space-y-3">
       <div class="p-3 bg-slate-50 rounded-lg text-sm text-slate-600">
         Recording payment for: <span class="font-bold text-slate-800">${ref ? (ref.bill_number || ref.invoice_number || ref.vendor || ref.customer) : refId}</span>
-        ${ref ? `— Balance: <span class="font-bold text-red-500">${fmt.currency(ref.balance_due)}</span>` : ''}
+        ${ref ? `— Balance: <span class="font-bold text-red-500">${fmt.currency(balance)}</span>` : ''}
+        ${isRecurring && monthly > 0 ? `<span class="ml-2 text-xs font-semibold text-violet-600 bg-violet-50 px-2 py-0.5 rounded-full"><i class="fas fa-sync-alt mr-1"></i>Monthly: ${fmt.currency(monthly)}</span>` : ''}
       </div>
+      ${isRecurring && monthly > 0 ? `
+      <div class="p-3 bg-violet-50 border border-violet-200 rounded-lg text-xs text-violet-700">
+        <i class="fas fa-info-circle mr-1"></i>
+        This is a recurring bill. Paying <strong>${fmt.currency(monthly)}</strong> will reduce the balance to <strong>${fmt.currency(Math.max(0, balance - monthly))}</strong>.
+        ${ref?.recurring_day ? `Next due date will be set to day <strong>${ref.recurring_day}</strong> of next month.` : ''}
+      </div>` : ''}
       ${field('Payment Date', 'date', 'date', today)}
-      ${field('Amount ($)', 'amount', 'number', ref?.balance_due || '', 'step="0.01" min="0"')}
+      ${field('Amount ($)', 'amount', 'number', payAmt, 'step="0.01" min="0"')}
       ${sel('Method', 'method', ['Bank Transfer','Cash','Credit Card','PayPal','Stripe','Check'], '')}
-      ${field('Account', 'account', 'text', 'Cash & Bank')}
+      ${accountSel('Pay From Account', 'account', ref?.paid_from || '', ['Asset','Liability'])}
       ${field('Reference / Notes', 'notes', 'text', '')}
       <input type="hidden" name="reference_id" value="${refId}">
       <input type="hidden" name="reference_type" value="${refType}">
@@ -1378,12 +1828,34 @@ function showPaymentModal(refId, refType = 'bill') {
     if (!data.amount) { toast('Amount required','error'); return; }
     try {
       data.created_by = user()?.name || '';
+
+      // For recurring bills: compute new balance and next due date before saving
+      if (isRecurring && refType === 'bill' && ref) {
+        const paid       = parseFloat(data.amount) || 0;
+        const newBalance = Math.max(0, balance - paid);
+        data.balance_due = newBalance.toFixed(2);
+        data.status      = newBalance <= 0 ? 'Paid' : 'Partial';
+
+        // Advance due date to recurring_day of next month
+        if (ref.recurring_day && newBalance > 0) {
+          const now   = new Date();
+          const year  = now.getMonth() === 11 ? now.getFullYear() + 1 : now.getFullYear();
+          const month = now.getMonth() === 11 ? 0 : now.getMonth() + 1;
+          const day   = Math.min(parseInt(ref.recurring_day), new Date(year, month + 1, 0).getDate());
+          data.due_date = `${year}-${String(month + 1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+        }
+
+        // Save bill update first (balance + new due date)
+        await api('financials/bills/update', { id: refId, balance_due: data.balance_due, status: data.status, due_date: data.due_date });
+      }
+
       await api('financials/payments/create', data);
       toast('Payment recorded','success');
       closeModal();
       await Promise.all([loadBills(), loadInvoices()]);
       const c = document.getElementById('fin-content');
       if (c) { if (refType === 'bill') renderBills(c); else renderInvoices(c); }
+      refreshLinkedTabs();
     } catch(e) { toast(e.message,'error'); }
   };
 }
@@ -1391,22 +1863,45 @@ function showPaymentModal(refId, refType = 'bill') {
 // Budget Modal
 function showBudgetModal(budget = null) {
   const now = new Date();
+  // Allow passing {category:'...'} as a shortcut from the unbudgeted panel
+  const preCategory = budget?.category || null;
+  const isEdit      = !!(budget?.id);
+
+  // Categories already budgeted this month (so user knows what's taken)
+  const taken = new Set(state.budgets.map(b => b.category));
+
+  const catOpts = EXP_CATS.map(cat => {
+    const isTaken = taken.has(cat) && cat !== preCategory;
+    return `<option value="${cat}" ${cat === (preCategory || EXP_CATS[0]) ? 'selected' : ''} ${isTaken ? 'disabled' : ''}>
+      ${cat}${isTaken ? ' (already set)' : ''}
+    </option>`;
+  }).join('');
+
   modal(
-    budget ? 'Edit Budget' : 'Set Budget',
+    isEdit ? 'Edit Budget' : 'Set Budget',
     `<form id="budget-form" class="space-y-3">
+      <div class="p-3 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-600">
+        <i class="fas fa-info-circle mr-1 text-slate-400"></i>
+        Set how much you plan to spend in a category this month. Your actual logged expenses will be compared against it automatically.
+      </div>
       <div class="grid grid-cols-2 gap-3">
         ${field('Year', 'year', 'number', budget?.year || now.getFullYear(), 'min="2020" max="2099"')}
         ${field('Month (01-12)', 'month', 'text', budget?.month || String(now.getMonth()+1).padStart(2,'0'))}
       </div>
-      ${sel('Category', 'category', EXP_CATS, budget?.category || EXP_CATS[0])}
-      ${field('Budget Amount ($)', 'budget_amount', 'number', budget?.budget_amount, 'step="0.01" min="0"')}
       <div>
-        <label class="block text-xs font-semibold text-slate-600 mb-1">Notes</label>
+        <label class="block text-xs font-semibold text-slate-600 mb-1">Expense Category</label>
+        <select name="category" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500 outline-none bg-white">
+          ${catOpts}
+        </select>
+      </div>
+      ${field('Budget Amount ($)', 'budget_amount', 'number', budget?.budget_amount, 'step="0.01" min="0" placeholder="e.g. 2000.00"')}
+      <div>
+        <label class="block text-xs font-semibold text-slate-600 mb-1">Notes (optional)</label>
         <textarea name="notes" rows="2" class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500 outline-none bg-white">${budget?.notes||''}</textarea>
       </div>
     </form>`,
     `<button onclick="closeModal()" class="btn-secondary">Cancel</button>
-     <button onclick="FinPage._saveBudget(${budget ? `'${budget.id}'` : 'null'})" class="btn-primary" style="background:#10b981">${budget ? 'Save' : 'Set Budget'}</button>`
+     <button onclick="FinPage._saveBudget(${isEdit ? `'${budget.id}'` : 'null'})" class="btn-primary" style="background:#10b981">${isEdit ? 'Save' : 'Set Budget'}</button>`
   );
 
   window.FinPage._saveBudget = async (id) => {
@@ -1418,6 +1913,7 @@ function showBudgetModal(budget = null) {
       closeModal();
       await loadBudgets();
       const c = document.getElementById('fin-content'); if(c) renderBudgets(c);
+      refreshLinkedTabs();
     } catch(e) { toast(e.message,'error'); }
   };
 }
@@ -1428,12 +1924,26 @@ function showAccountModal(acc = null) {
     acc ? 'Edit Account' : 'New Account',
     `<form id="acc-form" class="space-y-3">
       <div class="grid grid-cols-2 gap-3">
-        ${field('Account Number', 'account_number', 'text', acc?.account_number)}
-        ${sel('Type', 'type', ['Asset','Liability','Equity','Revenue','Expense'], acc?.type || 'Asset')}
+        ${field('Account Name', 'account_name', 'text', acc?.account_name)}
+        ${sel('Type', 'type', [
+          { value: 'Asset',     label: 'Asset — Bank / Cash' },
+          { value: 'Liability', label: 'Liability — Credit Card / Loan' },
+          { value: 'Equity',    label: 'Equity' },
+          { value: 'Revenue',   label: 'Revenue' },
+          { value: 'Expense',   label: 'Expense' },
+        ], acc?.type || 'Asset')}
       </div>
-      ${field('Account Name', 'account_name', 'text', acc?.account_name)}
-      ${field('Category', 'category', 'text', acc?.category)}
+      <div class="grid grid-cols-2 gap-3">
+        ${field('Account Number (optional)', 'account_number', 'text', acc?.account_number)}
+        ${field('Current Balance ($)', 'current_balance', 'number', acc?.current_balance || '0', 'step="0.01"')}
+      </div>
+      ${field('Category (e.g. Checking, Savings, Visa)', 'category', 'text', acc?.category)}
       ${field('Description', 'description', 'text', acc?.description)}
+      <div class="p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-700">
+        <i class="fas fa-info-circle mr-1"></i>
+        <strong>Asset</strong> accounts (bank, cash) receive invoice deposits and are debited for expenses/bills.
+        <strong>Liability</strong> accounts (credit cards) are used as payment sources and tracked as money owed.
+      </div>
     </form>`,
     `<button onclick="closeModal()" class="btn-secondary">Cancel</button>
      <button onclick="FinPage._saveAccount(${acc ? `'${acc.id}'` : 'null'})" class="btn-primary" style="background:#10b981">${acc ? 'Save' : 'Create'}</button>`
