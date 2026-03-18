@@ -93,6 +93,7 @@
     </p>
   </div>
 
+  <script src="js/i18n.js"></script>
   <script>
     // ─────────────────────────────────────────────
     //  LOGIN LOGIC - NO LOCAL STORAGE (Session Only)
@@ -190,6 +191,11 @@
     document.getElementById('password')?.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') doLogin();
     });
+
+    // Restore saved language
+    window.currentLang = localStorage.getItem('lang') || 'en';
+    if (window.currentLang !== 'en') setTimeout(() => autoTranslatePage(), 50);
   </script>
 </body>
 </html>
+
