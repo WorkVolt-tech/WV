@@ -1202,19 +1202,7 @@ async function api(path, params) {
         return;
       }
       
-      // If no admin, use public setup/init — no secret needed
-      var provUrl = new URL(url);
-      provUrl.searchParams.set('path', 'setup/init');
-      var provRes  = await fetch(provUrl.toString(), { cache: 'no-cache' });
-      var provData = await provRes.json();
-      if (provData.error) throw new Error(provData.error);
-
-      if (provData.provisioned || !hasAdmin) {
-        // First time setup - show admin creation form
-        renderAdminSetupForm();
-      } else {
-        render({ ok: true, message: '✓ Connected successfully! Work Volt is linked to your Google Sheet.' });
-      }
+            render({ ok: true, message: '✓ Connected successfully! Work Volt is linked to your Google Sheet.' });
     } catch(e) {
       render({ ok: false, message: 'Connection failed: ' + e.message + '. Check the URL and try again.' });
       if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-vial text-sm"></i> Test Connection'; }
