@@ -3,8 +3,8 @@ window.WorkVoltPages = window.WorkVoltPages || {};
 window.WorkVoltPages['settings'] = function(container) {
 
   // ── State ──────────────────────────────────────────────────────
-  let savedUrl    = localStorage.getItem('wv_gas_url')    || '';
-  let savedSecret = localStorage.getItem('wv_api_secret') || '';
+  let savedUrl    = '';
+  let savedSecret = '';
   let activeTab   = 'connection';
   let usersCache  = [];
   let editingUser = null;
@@ -1132,16 +1132,16 @@ async function api(path, params) {
   };
 
   window.settingsSave = function() {
-    var url = document.getElementById('settings-gas-url').value.trim();
+  var url = document.getElementById('settings-gas-url').value.trim();
+  if (!url) return window.WorkVolt?.toast('Please enter the GAS URL', 'warning');
 
-    if (!url) return window.WorkVolt?.toast('Please enter the GAS URL', 'warning');
-
-    localStorage.setItem('wv_gas_url', url);
-    savedUrl = url;
-    window.API_URL = url;
-    render({ ok: true, message: 'Settings saved. Testing connection…' });
-    setTimeout(function() { window.settingsTestConnection(); }, 400);
-  };
+  // Only use URL for this session - don't save to localStorage
+  savedUrl = url;
+  window.API_URL = url;
+  
+  render({ ok: true, message: 'Testing connection…' });
+  setTimeout(function() { window.settingsTestConnection(); }, 400);
+};
 
   window.settingsTestConnection = async function() {
     var url    = (document.getElementById('settings-gas-url')?.value || '').trim() || savedUrl;
@@ -1183,8 +1183,6 @@ async function api(path, params) {
   };
 
   window.settingsDisconnect = function() {
-    localStorage.removeItem('wv_gas_url');
-    localStorage.removeItem('wv_api_secret');
     savedUrl    = '';
     savedSecret = '';
     window.API_URL = '';
@@ -1192,12 +1190,5 @@ async function api(path, params) {
   };
 
     // ── Boot ──────────────────────────────────────────────────────
-  if (savedUrl) {
-    window.API_URL = savedUrl;
-  }
-  if (savedSecret) {
-    window.API_SECRET_CLIENT = savedSecret;
-  }
-
   render();
 };
