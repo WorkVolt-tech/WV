@@ -1113,10 +1113,12 @@ async function api(path, params) {
 
   window.settingsSave = function() {
   var url = document.getElementById('settings-gas-url').value.trim();
+  var secret = document.getElementById('settings-secret')?.value?.trim() || '';  // ADD THIS
+  
   if (!url) return window.WorkVolt?.toast('Please enter the GAS URL', 'warning');
 
-  // Only use URL for this session - don't save to localStorage
   savedUrl = url;
+  savedSecret = secret;  // ADD THIS
   window.API_URL = url;
   
   render({ ok: true, message: 'Testing connection…' });
@@ -1147,7 +1149,7 @@ async function api(path, params) {
       
       // If admin exists, no need for API secret - just save URL
       if (hasAdmin) {
-        localStorage.setItem('wv_gas_url', url);
+        
         savedUrl = url;
         window.API_URL = url;
         render({ ok: true, message: '✓ Connected successfully! Admins already set up. You can now login.' });
