@@ -100,33 +100,7 @@ async function api(path, params) {
   // ================================================================
   //  RENDER HELPERS
   // ================================================================
-  function renderProvision(provision) {
-    if (!provision) return '';
-    return (
-      '<div class="mt-3 bg-white border border-amber-300 rounded-xl p-4">' +
-        '<div class="flex items-center gap-2 mb-2">' +
-          '<i class="fas fa-key text-amber-500"></i>' +
-          '<span class="font-bold text-amber-700 text-sm">First-time credentials — save these now!</span>' +
-        '</div>' +
-        '<div class="space-y-1.5 font-mono text-xs">' +
-          '<div class="flex items-center justify-between bg-slate-50 rounded-lg px-3 py-2">' +
-            '<span class="text-slate-500">Email</span>' +
-            '<span class="font-semibold text-slate-800">' + provision.admin_email + '</span>' +
-          '</div>' +
-          '<div class="flex items-center justify-between bg-amber-50 rounded-lg px-3 py-2 border border-amber-200">' +
-            '<span class="text-amber-600">Temp password</span>' +
-            '<span class="font-bold text-amber-800 tracking-wider">' + provision.temp_password + '</span>' +
-          '</div>' +
-        '</div>' +
-        '<p class="text-xs text-amber-600 mt-2.5">' +
-          '<i class="fas fa-exclamation-triangle mr-1"></i>' +
-          'This password is shown <strong>once only</strong> — it is not stored anywhere. Copy it now.' +
-        '</p>' +
-      '</div>'
-    );
-  }
-
-  function renderStatus(status) {
+    function renderStatus(status) {
     if (!status) return '';
     const colorClass = status.ok
       ? 'bg-green-50 text-green-700 border border-green-200'
