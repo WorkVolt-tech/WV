@@ -112,7 +112,6 @@ async function api(path, params) {
           '<i class="fas ' + iconClass + '"></i>' +
           '<span>' + status.message + '</span>' +
         '</div>' +
-        renderProvision(status.provision) +
       '</div>'
     );
   }
