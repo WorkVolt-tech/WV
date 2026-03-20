@@ -54,31 +54,11 @@ async function api(path, params) {
   url.searchParams.set('token', savedSecret);
   
   // FIXED: Add session_id for protected routes - try multiple sources
-  let sessionId = '';
-  
-  // Try window.WorkVolt.session() if available
-  if (window.WorkVolt && typeof window.WorkVolt.session === 'function') {
-    try {
-      sessionId = window.WorkVolt.session();
-    } catch(e) {}
-  }
-  
-  // Fallback to localStorage
-  if (!sessionId) {
-    sessionId = localStorage.getItem('wv_session') || '';
-  }
-  
-  // Also try just 'session' key
-  if (!sessionId) {
-    sessionId = localStorage.getItem('session') || '';
-  }
+  let sessionId = sessionStorage.getItem('wv_session') || '';
   
   if (sessionId) {
     url.searchParams.set('session_id', sessionId);
-    console.log('Sending session:', sessionId.substring(0, 8) + '...'); // Debug log
-  } else {
-    console.warn('No session found for API call to:', path); // Debug log
-  }
+  } 
   
   if (params) {
     Object.entries(params).forEach(function(kv) {
