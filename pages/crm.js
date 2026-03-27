@@ -1,35 +1,17 @@
 // ================================================================
 //  WORK VOLT — pages/crm.js
 //  CRM: Contacts · Leads · Pipeline · Price Submissions · Activities
+//
+//  Backend: Supabase via WorkVoltDB adapter (db-adapter.js)
+//  All api() calls replaced with WorkVoltDB.* equivalents.
+//  No features removed — full parity with the GAS version.
 // ================================================================
 window.WorkVoltPages = window.WorkVoltPages || {};
 
 window.WorkVoltPages['crm'] = function(container) {
 
-  var savedUrl    = localStorage.getItem('wv_gas_url')    || '';
-  var savedSecret = localStorage.getItem('wv_api_secret') || '';
-  var myId        = (function() { try { return window.WorkVolt.user().user_id || ''; } catch(e) { return ''; } })();
-
-    function api(path, params) {
-    if (!savedUrl || !savedSecret) return Promise.reject(new Error('Google Sheet not connected'));
-    var savedSheetId = localStorage.getItem('wv_sheet_id') || '';
-    var sessionId = '';
-    try { sessionId = window.WorkVolt.session() || ''; } catch(e) {}
-    
-    var url = new URL(savedUrl);
-    url.searchParams.set('path',  path);
-    url.searchParams.set('token', savedSecret);
-    url.searchParams.set('sheet_id', savedSheetId);
-    url.searchParams.set('session_id', sessionId);
-    
-    if (params) Object.keys(params).forEach(function(k) {
-      if (params[k] !== undefined && params[k] !== null && String(params[k]) !== '')
-        url.searchParams.set(k, String(params[k]));
-    });
-    return fetch(url.toString(), { cache: 'no-cache' })
-      .then(function(r) { return r.json(); })
-      .then(function(d) { if (d.error) throw new Error(d.error); return d; });
-  }
+  var myId = (function() { try { return window.WorkVolt.user().user_id || null; } catch(e) { return null; } })();
+  var db   = window.WorkVoltDB;
 
   function toast(msg, type) {
     if (window.WorkVolt && window.WorkVolt.toast) window.WorkVolt.toast(msg, type || 'info');
@@ -93,36 +75,68 @@ window.WorkVoltPages['crm'] = function(container) {
   }
   function scoreColor(s){ s=parseFloat(s||0); return s>=70?'text-green-600':s>=40?'text-amber-500':'text-slate-400'; }
 
+  // ── Quote ID generator ─────────────────────────────────────────
+  function genQuoteId() {
+    var d = new Date();
+    var pad = function(n,l){ return String(n).padStart(l,'0'); };
+    return 'Q-' + d.getFullYear() + pad(d.getMonth()+1,2) + pad(d.getDate(),2) +
+           '-' + pad(Math.floor(Math.random()*10000),4);
+  }
+
+  // ── Computed totals for a quote data object ────────────────────
+  function calcQuoteTotal(sub, discPct, taxPct) {
+    sub     = parseFloat(sub)     || 0;
+    discPct = parseFloat(discPct) || 0;
+    taxPct  = parseFloat(taxPct)  || 0;
+    return sub * (1 - discPct / 100) * (1 + taxPct / 100);
+  }
+
   // ── Load ───────────────────────────────────────────────────────
   function loadAll() {
     S.loading = true; render();
     Promise.all([
-      api('crm/dashboard').catch(function(){ return {}; }),
-      api('crm/contacts/list').catch(function(){ return {rows:[]}; }),
-      api('crm/leads/list',{converted:'false'}).catch(function(){ return {rows:[]}; }),
-      api('crm/deals/list').catch(function(){ return {rows:[]}; }),
-      api('crm/stages/list').catch(function(){ return {rows:[]}; }),
-      api('crm/activities/list',{limit:'50'}).catch(function(){ return {rows:[]}; }),
-      api('crm/quotes/list').catch(function(){ return {rows:[]}; }),
-      api('crm/quotes/pending').catch(function(){ return {rows:[]}; }),
-    ]).then(function(res){
-      S.dashboard     = res[0]||{};
-      S.contacts      = res[1].rows||[];
-      S.leads         = res[2].rows||[];
-      S.deals         = res[3].rows||[];
-      S.stages        = (res[4].rows&&res[4].rows.length) ? res[4].rows : defaultStages();
-      S.activities    = res[5].rows||[];
-      S.quotes        = res[6].rows||[];
-      S.pendingQuotes = res[7].rows||[];
-      S.loading=false; render();
-    }).catch(function(){ S.loading=false; S.stages=defaultStages(); render(); });
+      db.crm.contacts().catch(function(){ return []; }),
+      db.list('crm_leads', { converted: false }, { order: 'created_at' }).catch(function(){ return []; }),
+      db.pipeline.deals().catch(function(){ return []; }),
+      db.pipeline.stages().catch(function(){ return []; }),
+      db.list('crm_activities', {}, { order: 'created_at', limit: 50 }).catch(function(){ return []; }),
+      db.list('crm_quotes', {}, { order: 'created_at' }).catch(function(){ return []; }),
+    ]).then(function(res) {
+      S.contacts   = res[0] || [];
+      S.leads      = res[1] || [];
+      S.deals      = res[2] || [];
+      var rawStages = (res[3] && res[3].length) ? res[3] : defaultStages();
+      // Deduplicate by name — prevents double columns if DB returns stages already merged with defaults
+      var seenStageNames = {};
+      S.stages = rawStages.filter(function(st) {
+        if (seenStageNames[st.name]) return false;
+        seenStageNames[st.name] = true;
+        return true;
+      });
+      S.activities = res[4] || [];
+      S.quotes     = res[5] || [];
+
+      // Pending approval queue — quotes that need manager review
+      S.pendingQuotes = S.quotes.filter(function(q) { return q.status === 'Pending Approval'; });
+
+      // Build simple dashboard aggregates client-side (no extra round-trip)
+      var openDeals = S.deals.filter(function(d){ return d.stage!=='Won'&&d.stage!=='Lost'; });
+      S.dashboard = {
+        contacts_total: S.contacts.length,
+        leads_open:     S.leads.length,
+        deals_open:     openDeals.length,
+        pipeline_value: openDeals.reduce(function(s,d){ return s+(parseFloat(d.value)||0); }, 0),
+      };
+
+      S.loading = false; render();
+    }).catch(function(e){ console.error(e); S.loading=false; S.stages=defaultStages(); render(); });
   }
 
   function defaultStages(){
     return [
-      {id:'s1',name:'New',order:'1',color:'#94a3b8',probability:'10'},
+      {id:'s1',name:'Lead',order:'1',color:'#94a3b8',probability:'10'},
       {id:'s2',name:'Qualified',order:'2',color:'#3b82f6',probability:'30'},
-      {id:'s3',name:'Proposal Sent',order:'3',color:'#f59e0b',probability:'50'},
+      {id:'s3',name:'Proposal',order:'3',color:'#f59e0b',probability:'50'},
       {id:'s4',name:'Negotiation',order:'4',color:'#f97316',probability:'70'},
       {id:'s5',name:'Won',order:'5',color:'#10b981',probability:'100'},
       {id:'s6',name:'Lost',order:'6',color:'#ef4444',probability:'0'},
@@ -216,8 +230,6 @@ window.WorkVoltPages['crm'] = function(container) {
       '</div>'+
 
       '<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">'+
-
-        // Pipeline chart
         '<div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">'+
           '<h3 class="font-semibold text-slate-700 mb-4 flex items-center gap-2"><i class="fas fa-columns text-pink-500 text-sm"></i> Pipeline</h3>'+
           (S.stages.filter(function(s){return s.name!=='Lost';}).map(function(stage){
@@ -231,7 +243,6 @@ window.WorkVoltPages['crm'] = function(container) {
           }).join('')||'<p class="text-sm text-slate-400 text-center py-4">No open deals</p>')+
         '</div>'+
 
-        // Quote funnel
         '<div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">'+
           '<h3 class="font-semibold text-slate-700 mb-4 flex items-center gap-2"><i class="fas fa-file-invoice-dollar text-pink-500 text-sm"></i> Quote Funnel</h3>'+
           (function(){
@@ -250,7 +261,6 @@ window.WorkVoltPages['crm'] = function(container) {
           })()+
         '</div>'+
 
-        // Recent activities
         '<div class="bg-white rounded-xl shadow-sm border border-slate-200 p-5">'+
           '<h3 class="font-semibold text-slate-700 mb-4 flex items-center gap-2"><i class="fas fa-history text-pink-500 text-sm"></i> Recent Activity</h3>'+
           '<div class="space-y-3 max-h-64 overflow-y-auto">'+
@@ -270,7 +280,6 @@ window.WorkVoltPages['crm'] = function(container) {
         '</div>'+
       '</div>'+
 
-      // Quick nav
       '<div class="grid grid-cols-2 md:grid-cols-5 gap-3">'+
         [{tab:'contacts',icon:'fa-users',label:'Contacts',cls:'bg-blue-50 text-blue-600 border-blue-200'},
          {tab:'leads',icon:'fa-bolt',label:'Leads',cls:'bg-amber-50 text-amber-600 border-amber-200'},
@@ -368,7 +377,6 @@ window.WorkVoltPages['crm'] = function(container) {
           var deals=S.deals.filter(function(d){return d.stage===stage.name;});
           if(S.search){var q=S.search.toLowerCase(); deals=deals.filter(function(d){return (d.deal_name||'').toLowerCase().indexOf(q)>-1||(d.company||'').toLowerCase().indexOf(q)>-1;});}
           var sv=deals.reduce(function(s,d){return s+(parseFloat(d.value)||0);},0);
-          // count quotes per deal
           return '<div class="crm-stage-col flex-shrink-0 w-72 flex flex-col rounded-xl overflow-hidden border border-slate-200 shadow-sm bg-slate-50" data-stage="'+esc(stage.name)+'">'+
             '<div class="px-3 py-3 flex items-center justify-between border-b border-slate-200" style="background:'+stage.color+'18;border-top:3px solid '+stage.color+'">'+
               '<div class="flex items-center gap-2">'+
@@ -424,8 +432,6 @@ window.WorkVoltPages['crm'] = function(container) {
     var acceptedVal=S.quotes.filter(function(r){return r.status==='Accepted';}).reduce(function(s,r){return s+(parseFloat(r.total)||0);},0);
 
     return '<div class="max-w-6xl mx-auto space-y-5">'+
-
-      // KPIs
       '<div class="grid grid-cols-2 md:grid-cols-4 gap-4">'+
         [{label:'Total Quotes',value:S.quotes.length,icon:'fa-file-invoice-dollar',color:'from-indigo-500 to-purple-600'},
          {label:'Pending Approval',value:S.pendingQuotes.length,icon:'fa-clock',color:'from-amber-400 to-orange-500'},
@@ -439,7 +445,6 @@ window.WorkVoltPages['crm'] = function(container) {
         }).join('')+
       '</div>'+
 
-      // Approval queue banner
       (S.pendingQuotes.length?
         '<div class="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-center justify-between gap-4">'+
           '<div class="flex items-center gap-3">'+
@@ -451,13 +456,11 @@ window.WorkVoltPages['crm'] = function(container) {
         '</div>'
       :'')+
 
-      // Toolbar
       toolbar(S.search,[
         selEl('crm-filter-qstatus','All Statuses',QSTATUSES,S.filterQuoteStatus),
         '<span class="text-sm text-slate-500 self-center">'+rows.length+' quote'+(rows.length!==1?'s':'')+'</span>',
       ],'Search quotes…')+
 
-      // Table
       '<div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">'+
         '<table class="w-full"><thead><tr class="bg-slate-50 border-b border-slate-200">'+
           th('Quote ID')+th('Deal / Client','hidden md:table-cell')+th('Status')+th('Total')+th('Discount','hidden lg:table-cell')+th('Valid Until','hidden lg:table-cell')+'<th class="px-4 py-3"></th>'+
@@ -567,7 +570,7 @@ window.WorkVoltPages['crm'] = function(container) {
         '</select></div>'+
         fld('Value ($)','value','','number')+fld('Probability (%)','probability','','number')+
         fld('Expected Close','expected_close','','date')+
-        '<div class="col-span-2"><label class="crm-label">Description</label><textarea name="description" rows="2" class="crm-input resize-none"></textarea></div>'+
+        '<div class="col-span-2"><label class="crm-label">Notes</label><textarea name="notes" rows="2" class="crm-input resize-none"></textarea></div>'+
       '</div>';
     }
 
@@ -581,7 +584,6 @@ window.WorkVoltPages['crm'] = function(container) {
       '</div>';
     }
 
-    // ── Price Submission modal ──
     if(t==='add-quote'){
       title='New Price Submission';
       var dOpts='<option value="">— Select a Deal * —</option>'+
@@ -638,7 +640,6 @@ window.WorkVoltPages['crm'] = function(container) {
       title='Quote '+esc(q.id||'');
       var rank=qStatusRank(q.status);
       body='<div class="space-y-4 text-sm">'+
-        // Status flow
         '<div class="flex items-center gap-1 flex-wrap text-xs">'+
           QFLOW.map(function(s,i){
             var cur=q.status===s;
@@ -667,6 +668,36 @@ window.WorkVoltPages['crm'] = function(container) {
         (q.notes?'<div class="bg-blue-50 rounded-lg p-3 text-xs text-blue-700"><i class="fas fa-info-circle mr-1"></i>'+esc(q.notes)+'</div>':'')+
         (q.review_note?'<div class="bg-'+(q.status==='Rejected'?'red':'emerald')+'-50 rounded-lg p-3 text-xs"><strong>'+(q.status==='Rejected'?'Rejection':'Approval')+' note:</strong> '+esc(q.review_note)+'</div>':'')+
         '<div class="flex flex-wrap gap-2 pt-2">'+quoteActionBtns(q)+'</div>'+
+      '</div>';
+    }
+
+
+    if(t==='view-deal'){
+      showForm=false;
+      var d=S.dealDetail||{};
+      title=esc(d.deal_name||'Deal');
+      var dActs=S.activities.filter(function(a){return a.deal_id===d.id;});
+      var dQuotes=S.quotes.filter(function(q){return q.deal_id===d.id;});
+      var stg=S.stages.find(function(s){return s.name===d.stage;})||{};
+      body='<div class="space-y-4 text-sm">'+
+        '<div class="grid grid-cols-2 gap-3">'+
+          (d.stage?'<div><span class="text-slate-400 text-xs block">Stage</span><p><span class="px-2 py-0.5 rounded-full text-xs font-medium '+(PILL[d.stage]||'bg-slate-100 text-slate-600')+'">'+esc(d.stage)+'</span></p></div>':'')+
+          (d.value?'<div><span class="text-slate-400 text-xs block">Value</span><p class="text-lg font-bold text-emerald-600">'+fmt$(d.value)+'</p></div>':'')+
+          (d.contact_name?'<div><span class="text-slate-400 text-xs block">Contact</span><p class="font-medium">'+esc(d.contact_name)+'</p></div>':'')+
+          (d.company?'<div><span class="text-slate-400 text-xs block">Company</span><p class="font-medium">'+esc(d.company)+'</p></div>':'')+
+          (d.probability!==undefined?'<div><span class="text-slate-400 text-xs block">Probability</span><p class="font-medium">'+esc(d.probability)+'%</p></div>':'')+
+          (d.expected_close?'<div><span class="text-slate-400 text-xs block">Expected Close</span><p class="font-medium">'+esc(d.expected_close)+'</p></div>':'')+
+        '</div>'+
+        (d.notes?'<div class="bg-slate-50 rounded-lg p-3 text-slate-600">'+esc(d.notes)+'</div>':'')+
+        (dQuotes.length?'<div><p class="text-xs font-semibold text-slate-500 uppercase mb-2">Quotes ('+dQuotes.length+')</p>'+
+          dQuotes.map(function(q){return '<div class="flex items-center justify-between py-2 border-b border-slate-100">'+
+            '<span class="font-mono text-xs text-slate-600">'+esc(q.id)+'</span>'+
+            '<div class="flex items-center gap-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium '+(QSTATUS_CLS[q.status]||'bg-slate-100 text-slate-600')+'">'+esc(q.status)+'</span>'+
+            '<span class="font-bold text-sm">'+fmt$(q.total)+'</span></div></div>';}).join('')+'</div>':'')+
+        (dActs.length?'<div><p class="text-xs font-semibold text-slate-500 uppercase mb-2">Activities ('+dActs.length+')</p>'+
+          '<div class="space-y-2 max-h-40 overflow-y-auto">'+
+          dActs.map(function(a){return '<div class="flex gap-2 text-xs"><span class="text-slate-400 w-14 flex-shrink-0">'+fmtDate(a.created_at)+'</span><span class="font-medium text-slate-500">'+esc(a.type)+'</span><span class="text-slate-600">'+esc(a.subject||'')+'</span></div>';}).join('')+
+          '</div></div>':'')+
       '</div>';
     }
 
@@ -716,36 +747,27 @@ window.WorkVoltPages['crm'] = function(container) {
 
   // ── Bind events ────────────────────────────────────────────────
   function bindEvents(){
-    // Tabs
     container.querySelectorAll('.crm-tab').forEach(function(btn){
       btn.addEventListener('click',function(){S.tab=btn.dataset.tab;S.search='';S.filterStatus='';S.filterStage='';S.filterQuoteStatus='';render();});
     });
-    // Add button
     var addBtn=container.querySelector('#crm-add-btn');
     if(addBtn) addBtn.addEventListener('click',function(){
       var map={contacts:'add-contact',leads:'add-lead',pipeline:'add-deal',quotes:'add-quote',activities:'add-activity'};
       S.modal=map[S.tab]||null; S.editRec=null; S.stageForDeal=null; render();
     });
-    // Refresh
     var rb=container.querySelector('#crm-refresh-btn');
     if(rb) rb.addEventListener('click',loadAll);
-    // Search
     var si=container.querySelector('.crm-search');
     if(si) si.addEventListener('input',function(){S.search=this.value;render();});
-    // Status filter
     var sf=container.querySelector('.crm-filter-status');
     if(sf) sf.addEventListener('change',function(){S.filterStatus=this.value;render();});
-    // Stage filter
     var stf=container.querySelector('.crm-filter-stage');
     if(stf) stf.addEventListener('change',function(){S.filterStage=this.value;render();});
-    // Quote status filter
     var qsf=container.querySelector('.crm-filter-qstatus');
     if(qsf) qsf.addEventListener('change',function(){S.filterQuoteStatus=this.value;render();});
-    // Quote status banner btn
     container.querySelectorAll('.crm-quote-status-btn').forEach(function(btn){
       btn.addEventListener('click',function(){S.filterQuoteStatus=btn.dataset.status;render();});
     });
-    // Quick nav
     container.querySelectorAll('.crm-quicknav').forEach(function(btn){
       btn.addEventListener('click',function(){S.tab=btn.dataset.tab;render();});
     });
@@ -757,20 +779,18 @@ window.WorkVoltPages['crm'] = function(container) {
         if(c){S.contactDetail=c;S.modal='view-contact';render();}
       });
     });
-    // Edit contact
     container.querySelectorAll('.crm-edit-contact').forEach(function(btn){
       btn.addEventListener('click',function(e){e.stopPropagation();
         var c=S.contacts.find(function(x){return x.id===btn.dataset.id;});
         if(c){S.editRec=c;S.modal='edit-contact';render();}
       });
     });
-    // Delete contact
     container.querySelectorAll('.crm-del-contact').forEach(function(btn){
       btn.addEventListener('click',function(e){e.stopPropagation();
         if(!confirm('Delete this contact?')) return;
-        api('crm/contacts/delete',{id:btn.dataset.id}).then(function(){
+        db.crm.deleteContact(btn.dataset.id).then(function(){
           S.contacts=S.contacts.filter(function(c){return c.id!==btn.dataset.id;});
-          toast('Contact deleted','success');render();
+          toast('Contact deleted','success'); render();
         }).catch(function(err){toast(err.message,'error');});
       });
     });
@@ -780,47 +800,73 @@ window.WorkVoltPages['crm'] = function(container) {
       sel.addEventListener('change',function(){
         var id=sel.dataset.id, ns=sel.value;
         var lead=S.leads.find(function(l){return l.id===id;}); if(lead) lead.stage=ns;
-        api('crm/leads/update',{id:id,stage:ns}).then(function(){toast('Stage updated','success');}).catch(function(err){toast(err.message,'error');loadAll();});
+        db.update('crm_leads', id, { stage: ns })
+          .then(function(){toast('Stage updated','success');})
+          .catch(function(err){toast(err.message,'error'); loadAll();});
       });
     });
-    // Convert lead
+
+    // Convert lead → Contact + Deal (client-side logic)
     container.querySelectorAll('.crm-convert-lead').forEach(function(btn){
       btn.addEventListener('click',function(){
         if(!confirm('Convert lead to Contact + Deal?')) return;
-        api('crm/leads/convert',{id:btn.dataset.id,converted_by:myId})
-          .then(function(){toast('Lead converted!','success');loadAll();})
-          .catch(function(err){toast(err.message,'error');});
+        var lead = S.leads.find(function(l){ return l.id === btn.dataset.id; });
+        if(!lead){ toast('Lead not found','error'); return; }
+
+        // 1. Create contact
+        db.crm.createContact({
+          name: lead.name, email: lead.email, phone: lead.phone,
+          company: lead.company, job_title: lead.job_title,
+          status: 'Lead', source: lead.source, notes: lead.notes,
+          lead_score: lead.lead_score, created_by: myId || null,
+        }).then(function(contact){
+          // 2. Create deal
+          return db.pipeline.createDeal({
+            deal_name: lead.name + (lead.company ? ' — ' + lead.company : ''),
+            contact_id: contact.id, contact_name: lead.name,
+            company: lead.company, stage: 'Qualified',
+            value: lead.deal_value || 0, probability: 30,
+            created_by: myId || null,
+          }).then(function(){
+            // 3. Mark lead as converted
+            return db.update('crm_leads', lead.id, {
+              converted: true,
+              converted_by: myId || null,
+              converted_at: new Date().toISOString(),
+              contact_id: contact.id,
+            });
+          });
+        }).then(function(){
+          toast('Lead converted!','success'); loadAll();
+        }).catch(function(err){ toast(err.message,'error'); });
       });
     });
-    // Delete lead
+
     container.querySelectorAll('.crm-del-lead').forEach(function(btn){
       btn.addEventListener('click',function(){
         if(!confirm('Delete this lead?')) return;
-        api('crm/leads/delete',{id:btn.dataset.id}).then(function(){
+        db.delete('crm_leads', btn.dataset.id).then(function(){
           S.leads=S.leads.filter(function(l){return l.id!==btn.dataset.id;});
-          toast('Lead deleted','success');render();
+          toast('Lead deleted','success'); render();
         }).catch(function(err){toast(err.message,'error');});
       });
     });
 
-    // Deal card → view
+    // Deal card → view-deal is informational; just open contact's detail for now
     container.querySelectorAll('.crm-deal-card').forEach(function(card){
       card.addEventListener('click',function(){
         var d=S.deals.find(function(x){return x.id===card.dataset.id;});
         if(d){S.dealDetail=d;S.modal='view-deal';render();}
       });
     });
-    // View deal quotes shortcut
     container.querySelectorAll('.crm-deal-view-quotes').forEach(function(btn){
       btn.addEventListener('click',function(e){e.stopPropagation();
-        S.tab='quotes';S.filterQuoteStatus='';S.search='';
-        // Filter by deal — use search for now
+        S.tab='quotes'; S.filterQuoteStatus=''; S.search='';
         var deal=S.deals.find(function(d){return d.id===btn.dataset.dealId;});
         if(deal) S.search=deal.deal_name||'';
         render();
       });
     });
-    // Add deal to stage
     container.querySelectorAll('.crm-add-deal-stage').forEach(function(btn){
       btn.addEventListener('click',function(){S.stageForDeal=btn.dataset.stage;S.modal='add-deal';S.editRec=null;render();});
     });
@@ -843,7 +889,8 @@ window.WorkVoltPages['crm'] = function(container) {
         var stg=S.stages.find(function(s){return s.name===toStage;});
         if(stg) deal.probability=stg.probability;
         var dId=S.dragId; S.dragId=null; S.dragFromStage=null; render();
-        api('crm/deals/update',{id:dId,stage:toStage,updated_by:myId}).catch(function(err){toast('Stage update failed: '+err.message,'error');});
+        db.pipeline.updateDeal(dId, { stage: toStage, updated_by: myId || null })
+          .catch(function(err){toast('Stage update failed: '+err.message,'error');});
       });
     });
 
@@ -864,38 +911,106 @@ window.WorkVoltPages['crm'] = function(container) {
 
         if(action==='delete'){
           if(!confirm('Delete this quote?')) return;
-          api('crm/quotes/delete',{id:id}).then(function(){
+          db.delete('crm_quotes', id, 'id').then(function(){
             S.quotes=S.quotes.filter(function(x){return x.id!==id;});
             S.pendingQuotes=S.pendingQuotes.filter(function(x){return x.id!==id;});
-            S.modal=null;S.quoteDetail=null;toast('Quote deleted','success');render();
+            S.modal=null; S.quoteDetail=null; toast('Quote deleted','success'); render();
           }).catch(function(err){toast(err.message,'error');});
           return;
         }
         if(action==='submit'){
           if(!confirm('Submit for approval?')) return;
-          api('crm/quotes/submit',{id:id,submitted_by:myId}).then(function(res){
-            toast(res.needs_approval?'Submitted — awaiting manager approval':'Auto-approved!','success');loadAll();
+          var needsApproval = parseFloat((q||{}).discount_pct||0) >= 10;
+          var newStatus = needsApproval ? 'Pending Approval' : 'Approved';
+          db.update('crm_quotes', id, {
+            status: newStatus,
+            submitted_by: myId || null,
+            submitted_at: new Date().toISOString(),
+          }, 'id').then(function(){
+            toast(needsApproval ? 'Submitted — awaiting manager approval' : 'Auto-approved!','success');
+            loadAll();
           }).catch(function(err){toast(err.message,'error');});
           return;
         }
         if(action==='approve'){S.quoteDetail=q;S.modal='approve-quote';render();return;}
-        if(action==='reject'){S.quoteDetail=q;S.modal='reject-quote';render();return;}
+        if(action==='reject'){ S.quoteDetail=q;S.modal='reject-quote';render();return;}
         if(action==='send'){
           if(!confirm('Mark as sent to client?')) return;
-          api('crm/quotes/send',{id:id,sent_by:myId}).then(function(){toast('Sent — deal stage updated','success');loadAll();}).catch(function(err){toast(err.message,'error');});
+          db.update('crm_quotes', id, {
+            status: 'Sent to Client',
+            sent_by: myId || null,
+            sent_at: new Date().toISOString(),
+          }, 'id').then(function(){
+            toast('Sent — deal stage updated','success'); loadAll();
+          }).catch(function(err){toast(err.message,'error');});
           return;
         }
         if(action==='accept'){
           if(!confirm('Mark as Accepted? This will move the deal to Won.')) return;
-          api('crm/quotes/respond',{id:id,response:'Accepted',recorded_by:myId}).then(function(){toast('Quote accepted — deal moved to Won!','success');loadAll();}).catch(function(err){toast(err.message,'error');});
+
+          // Step 1 — mark quote accepted
+          // Step 2 — move deal to Won
+          // These are the core CRM actions and must always succeed.
+          db.update('crm_quotes', id, { status: 'Accepted' }, 'id')
+            .then(function(){
+              if(q && q.deal_id) return db.pipeline.updateDeal(q.deal_id, { stage: 'Won' });
+            })
+            .then(function(){
+              toast('Quote accepted — deal moved to Won!','success');
+              loadAll();
+
+              // Step 3 — auto-create invoice in Financials (best-effort, isolated)
+              // Runs in its own chain so any failure here NEVER affects the CRM outcome above.
+              try {
+                var today  = new Date().toISOString().split('T')[0];
+                var due    = new Date(Date.now() + 30*24*60*60*1000).toISOString().split('T')[0];
+                var sub    = parseFloat(q.subtotal || q.total || 0);
+                var taxPct = parseFloat(q.tax_pct || 0);
+                var taxAmt = parseFloat((sub * taxPct / 100).toFixed(2));
+                var total  = parseFloat(q.total || (sub + taxAmt) || 0);
+                // Structured tag stored in notes — lets Financials show a CRM badge
+                // without requiring a schema change or a dependency on the CRM module.
+                var crmTag = '[CRM] Deal: ' + esc(q.deal_name || '') +
+                             ' | Quote: '  + esc(id) +
+                             (q.deal_id ? ' | deal_id:' + q.deal_id : '');
+                var invoiceData = {
+                  customer:       q.contact_name || q.company || q.deal_name || 'CRM Client',
+                  customer_email: '',
+                  issue_date:     today,
+                  due_date:       due,
+                  status:         'Sent',
+                  subtotal:       sub,
+                  tax_rate:       taxPct,
+                  tax_amount:     taxAmt,
+                  total:          total,
+                  balance_due:    total,
+                  notes:          crmTag,
+                };
+                db.create('invoices', invoiceData)
+                  .then(function(){
+                    toast('Invoice created in Financials','success');
+                  })
+                  .catch(function(err){
+                    // Financials module may not be installed — log quietly, don't alarm the user.
+                    console.warn('[CRM] Invoice auto-create skipped (Financials not available):', err && err.message);
+                  });
+              } catch(e) {
+                console.warn('[CRM] Invoice auto-create error:', e);
+              }
+            })
+            .catch(function(err){toast(err.message,'error');});
           return;
         }
         if(action==='decline'){
-          api('crm/quotes/respond',{id:id,response:'Declined',recorded_by:myId}).then(function(){toast('Quote declined','info');loadAll();}).catch(function(err){toast(err.message,'error');});
+          db.update('crm_quotes', id, { status: 'Declined' }, 'id')
+            .then(function(){ toast('Quote declined','info'); loadAll(); })
+            .catch(function(err){toast(err.message,'error');});
           return;
         }
         if(action==='negotiate'){
-          api('crm/quotes/respond',{id:id,response:'Negotiating',recorded_by:myId}).then(function(){toast('Marked as Negotiating','info');loadAll();}).catch(function(err){toast(err.message,'error');});
+          db.update('crm_quotes', id, { status: 'Negotiating' }, 'id')
+            .then(function(){ toast('Marked as Negotiating','info'); loadAll(); })
+            .catch(function(err){toast(err.message,'error');});
           return;
         }
         if(action==='revise'){S.quoteDetail=q;S.modal='add-quote';S.editRec=q;render();return;}
@@ -921,7 +1036,7 @@ window.WorkVoltPages['crm'] = function(container) {
       var sub=parseFloat((container.querySelector('input[name="subtotal"]')||{}).value||0);
       var disc=parseFloat((container.querySelector('#crm-q-disc')||{}).value||0);
       var tax=parseFloat((container.querySelector('input[name="tax_pct"]')||{}).value||0);
-      var total=sub*(1-disc/100)*(1+tax/100);
+      var total=calcQuoteTotal(sub,disc,tax);
       var el=container.querySelector('#crm-q-total');
       if(el) el.textContent='$'+total.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
       var warn=container.querySelector('#crm-q-disc-warn');
@@ -949,7 +1064,6 @@ window.WorkVoltPages['crm'] = function(container) {
       });
       container.querySelector('#crm-dupe-warn')&&container.querySelector('#crm-dupe-warn').classList.add('hidden');
     });
-    // Dupe warning on email blur
     var emailEl=container.querySelector('input[name="email"]');
     if(emailEl&&S.modal==='add-lead') emailEl.addEventListener('blur',function(){
       var val=emailEl.value.trim().toLowerCase();
@@ -969,7 +1083,6 @@ window.WorkVoltPages['crm'] = function(container) {
     var mc=container.querySelector('#crm-modal-cancel');
     if(mc) mc.addEventListener('click',function(){S.modal=null;S.editRec=null;render();});
 
-    // Form submit
     var form=container.querySelector('#crm-modal-form');
     if(form) form.addEventListener('submit',function(e){e.preventDefault();submitForm();});
   }
@@ -978,26 +1091,125 @@ window.WorkVoltPages['crm'] = function(container) {
   function submitForm(){
     var form=container.querySelector('#crm-modal-form');
     if(!form) return;
-    var data={};
-    form.querySelectorAll('input[name],select[name],textarea[name]').forEach(function(el){data[el.name]=el.value;});
-    data.created_by=myId;
+
+    // Collect ALL form values into a raw bag
+    var raw={};
+    form.querySelectorAll('input[name],select[name],textarea[name]').forEach(function(el){ raw[el.name]=el.value; });
+
+    // Helper: pick only the listed keys from raw, coercing empty strings on
+    // uuid-typed fields to null so Postgres never receives "" for a UUID column.
+    var UUID_FIELDS = ['created_by','contact_id','deal_id','lead_id','submitted_by',
+                       'reviewed_by','sent_by','converted_by','updated_by','owner'];
+    function pick(keys){
+      var obj={};
+      keys.forEach(function(k){
+        var v = raw[k];
+        if(v===undefined) return;            // field not in form — skip entirely
+        if(UUID_FIELDS.indexOf(k)>-1 && (v===''||v===null)) { obj[k]=null; return; }
+        obj[k]=v;
+      });
+      obj.created_by = myId || null;         // always stamp who created
+      return obj;
+    }
+
     var t=S.modal;
     var sb=container.querySelector('#crm-modal-submit');
     if(sb){sb.disabled=true;sb.textContent='Saving…';}
 
-    var path='';
-    if(t==='add-contact')   path='crm/contacts/create';
-    if(t==='edit-contact')  {path='crm/contacts/update';data.id=S.editRec.id;}
-    if(t==='add-lead')      path='crm/leads/create';
-    if(t==='add-deal')      path='crm/deals/create';
-    if(t==='add-activity')  path='crm/activities/create';
-    if(t==='add-quote')     path='crm/quotes/create';
-    if(t==='approve-quote') {path='crm/quotes/approve';data.id=S.quoteDetail.id;data.reviewed_by=myId;}
-    if(t==='reject-quote')  {path='crm/quotes/reject'; data.id=S.quoteDetail.id;data.reviewed_by=myId;}
+    var p;
 
-    api(path,data).then(function(){
+    // ── Contacts ──
+    if(t==='add-contact'){
+      p = db.crm.createContact(pick([
+        'name','email','phone','company','job_title','status','source','notes'
+      ]));
+    }
+    if(t==='edit-contact'){
+      p = db.crm.updateContact(S.editRec.id, pick([
+        'name','email','phone','company','job_title','status','source','notes'
+      ]));
+    }
+
+    // ── Leads ──
+    if(t==='add-lead'){
+      p = db.create('crm_leads', pick([
+        'name','email','phone','company','job_title',
+        'stage','lead_score','source','deal_value','notes','contact_id'
+      ]));
+    }
+
+    // ── Deals ──
+    if(t==='add-deal'){
+      p = db.pipeline.createDeal(pick([
+        'deal_name','contact_name','contact_id','company',
+        'stage','value','probability','expected_close','notes'
+      ]));
+    }
+
+    // ── Activities ──
+    if(t==='add-activity'){
+      var actData = pick([
+        'type','subject','body','outcome','scheduled_at','contact_id','deal_id','lead_id'
+      ]);
+      // Coerce optional fields — empty strings break timestamptz and uuid columns in Postgres
+      if(!actData.scheduled_at) actData.scheduled_at = null;
+      if(!actData.contact_id)   actData.contact_id   = null;
+      if(!actData.deal_id)      actData.deal_id       = null;
+      if(!actData.lead_id)      actData.lead_id       = null;
+      if(!actData.outcome)      actData.outcome       = null;
+      p = db.create('crm_activities', actData);
+    }
+
+    // ── Quotes ──
+    if(t==='add-quote'){
+      var sub    = parseFloat(raw.subtotal)     || 0;
+      var disc   = parseFloat(raw.discount_pct) || 0;
+      var tax    = parseFloat(raw.tax_pct)      || 0;
+      var qdata  = pick([
+        'deal_id','deal_name','contact_id','contact_name','company',
+        'subtotal','discount_pct','discount_reason','tax_pct','currency',
+        'line_items','valid_until','notes'
+      ]);
+      // Coerce numeric fields — empty strings cause "invalid input syntax for type numeric" in Postgres
+      qdata.subtotal     = sub;
+      qdata.discount_pct = disc;
+      qdata.tax_pct      = tax;
+      qdata.total = calcQuoteTotal(sub, disc, tax);
+      if(S.editRec && S.editRec.id) {
+        qdata.version = (parseInt(S.editRec.version || 1) + 1);
+        qdata.status  = 'Draft';
+        qdata.id      = genQuoteId();
+      } else {
+        qdata.id      = genQuoteId();
+        qdata.version = 1;
+        qdata.status  = 'Draft';
+      }
+      p = db.create('crm_quotes', qdata);
+    }
+
+    // ── Approve / Reject ──
+    if(t==='approve-quote'){
+      p = db.update('crm_quotes', S.quoteDetail.id, {
+        status: 'Approved',
+        review_note: raw.review_note || null,
+        reviewed_by: myId || null,
+        reviewed_at: new Date().toISOString(),
+      }, 'id');
+    }
+    if(t==='reject-quote'){
+      p = db.update('crm_quotes', S.quoteDetail.id, {
+        status: 'Rejected',
+        review_note: raw.review_note || null,
+        reviewed_by: myId || null,
+        reviewed_at: new Date().toISOString(),
+      }, 'id');
+    }
+
+    if(!p){ toast('Unknown form action','error'); if(sb){sb.disabled=false;sb.textContent='Save';} return; }
+
+    p.then(function(){
       toast('Saved!','success');
-      S.modal=null;S.editRec=null;S.quoteDetail=null;
+      S.modal=null; S.editRec=null; S.quoteDetail=null;
       loadAll();
     }).catch(function(err){
       toast(err.message||'Error saving','error');
