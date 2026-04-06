@@ -303,7 +303,7 @@ window.WorkVoltPages['recruitment'] = function(container) {
 
   // ── Complete hire — creates user account ────────────────────────
   async function completeHire(params) {
-    const { candidate_id, role, active, password, reason, moved_by, mover_name } = params;
+    const { candidate_id, role, active, reason, moved_by, mover_name } = params;
 
     const candidate = await getCandidate(candidate_id);
 
@@ -316,35 +316,49 @@ window.WorkVoltPages['recruitment'] = function(container) {
       mover_name: mover_name || '',
     });
 
-    // 2. Create the user account in the users table
-    //    Password hashing is handled by Supabase Auth — we create
-    //    the auth user first, then upsert the profile row.
-    let newUserId = null;
+    // 2. Create auth user via Supabase Admin REST API.
+    //    Uses the current admin's JWT — bypasses signUp restrictions entirely.
+    //    Does NOT affect the current admin session.
     let userAccount = null;
 
     try {
-      // Create Supabase Auth account
-      const { data: authData, error: authErr } =
-        await supabase.auth.admin
-          ? supabase.auth.admin.createUser({
-              email:             candidate.email,
-              password,
-              email_confirm:     true,
-            })
-          // Fallback: signUp (works when admin API is unavailable in browser)
-          : await supabase.auth.signUp({
-              email:    candidate.email,
-              password,
-            });
+      const stored = JSON.parse(localStorage.getItem('wv_db_config') || '{}');
+      const { url, anonKey } = stored.credentials || {};
+      if (!url || !anonKey) throw new Error('Could not read Supabase credentials.');
 
-      if (authErr) throw new Error(authErr.message);
+      const serviceKey = window._wvSupabaseServiceKey;
+      if (!serviceKey) throw new Error(
+        'Service Role Key not configured. Go to Settings → Database and add your Supabase Service Role Key.'
+      );
 
-      const authUser = authData?.user;
-      newUserId = authUser?.id || newUUID();
+      const tempPassword =
+        'Wv-' + Math.random().toString(36).slice(2, 9) +
+        '-' + Math.random().toString(36).slice(2, 5).toUpperCase();
 
-      // 3. Insert profile row into public.users
+      const res = await fetch(`${url}/auth/v1/admin/users`, {
+        method:  'POST',
+        headers: {
+          'Content-Type':  'application/json',
+          'apikey':        serviceKey,
+          'Authorization': `Bearer ${serviceKey}`,
+        },
+        body: JSON.stringify({
+          email:         candidate.email,
+          password:      tempPassword,
+          email_confirm: true,
+          user_metadata: { name: candidate.name },
+        }),
+      });
+
+      const authData = await res.json();
+      if (!res.ok) throw new Error(authData.msg || authData.message || `Admin API error ${res.status}`);
+
+      const authUserId = authData.id;
+      if (!authUserId) throw new Error('Auth user created but no ID returned.');
+
+      // 3. Upsert profile into public.users using the real auth UUID
       const profileRow = {
-        id:         newUserId,
+        id:         authUserId,
         name:       candidate.name,
         email:      candidate.email,
         role:       role   || 'Employee',
@@ -354,31 +368,27 @@ window.WorkVoltPages['recruitment'] = function(container) {
 
       const { data: profile, error: profErr } = await supabase
         .from('users')
-        .insert(profileRow)
+        .upsert(profileRow, { onConflict: 'id' })
         .select()
         .single();
 
-      if (profErr) {
-        // Profile row might already exist if auth user was pre-existing
-        console.warn('recruitment: users insert warning:', profErr.message);
-      }
-
+      if (profErr) throw new Error('Profile save failed: ' + profErr.message);
       userAccount = profile || profileRow;
 
       // 4. Link hired user back to the candidate row
       await supabase
         .from('recruitment_candidates')
-        .update({ user_id_created: newUserId })
+        .update({ user_id_created: authUserId })
         .eq('candidate_id', candidate_id);
 
     } catch(e) {
-      // If user creation fails we still want the stage move to persist
-      console.error('recruitment: completeHire user creation failed:', e.message);
-      throw e;
+      console.error('recruitment: completeHire failed:', e.message);
+      throw new Error('Hired, but account creation failed: ' + e.message);
     }
 
     return { user_account: userAccount };
   }
+
 
   // ── Notes ───────────────────────────────────────────────────────
   async function listNotes(candidateId) {
@@ -1727,15 +1737,15 @@ window.WorkVoltPages['recruitment'] = function(container) {
         <div class="grid grid-cols-2 gap-3">
           <button id="app-access-no"
             class="flex flex-col items-center gap-2 px-4 py-5 rounded-2xl border-2 border-slate-200 hover:border-slate-400 hover:bg-slate-50 transition-all text-slate-600">
-            <i class="fas fa-times-circle text-2xl text-slate-400"></i>
+            <i class="fas fa-user-slash text-2xl text-slate-400"></i>
             <span class="font-extrabold text-sm">No</span>
-            <span class="text-[11px] text-slate-400 text-center leading-tight">Add as Contractor<br>access disabled</span>
+            <span class="text-[11px] text-slate-400 text-center leading-tight">Account created<br>access disabled</span>
           </button>
           <button id="app-access-yes"
             class="flex flex-col items-center gap-2 px-4 py-5 rounded-2xl border-2 border-slate-200 hover:border-blue-400 hover:bg-blue-50 transition-all text-slate-600">
-            <i class="fas fa-check-circle text-2xl text-blue-400"></i>
+            <i class="fas fa-user-check text-2xl text-blue-400"></i>
             <span class="font-extrabold text-sm">Yes</span>
-            <span class="text-[11px] text-slate-400 text-center leading-tight">Add as Employee<br>open profile to complete</span>
+            <span class="text-[11px] text-slate-400 text-center leading-tight">Account created<br>access enabled</span>
           </button>
         </div>
 
@@ -1771,13 +1781,10 @@ window.WorkVoltPages['recruitment'] = function(container) {
     };
 
     async function doCompleteHire(role, active) {
-      const tempPass = 'WV-' + Math.random().toString(36).slice(2,8).toUpperCase()
-                     + '-' + Math.random().toString(36).slice(2,8).toUpperCase();
       return completeHire({
         candidate_id: c.candidate_id,
         role,
         active,
-        password:   tempPass,
         reason,
         moved_by:   user.user_id || user.id || '',
         mover_name: user.name || user.email || 'System',
@@ -1788,13 +1795,36 @@ window.WorkVoltPages['recruitment'] = function(container) {
       try {
         disableBtns();
         setStatus('<i class="fas fa-circle-notch fa-spin mr-1"></i>Processing…', true);
-        await doCompleteHire('Contractor', false);
-        toast(`${c.name || 'Candidate'} hired — added as Contractor with access disabled`, 'success');
+        const res = await doCompleteHire('Employee', false);
+        const newUserId = res.user_account?.id || null;
+        toast(`${c.name || 'Candidate'} hired — account created with access disabled`, 'success');
         closeModal();
         closeDetailPanel();
         await loadCandidates();
         await loadDashboard();
         render();
+
+        // Navigate to Settings → User Management so admin can review the profile
+        setTimeout(() => {
+          if (window.WorkVolt?.navigate) window.WorkVolt.navigate('settings');
+          setTimeout(() => {
+            if (typeof window.settingsTab === 'function') window.settingsTab('users');
+            if (newUserId) {
+              let attempts = 0;
+              const tryOpen = () => {
+                attempts++;
+                if (typeof window.usersOpenEdit === 'function') window.usersOpenEdit(newUserId);
+                const backdrop = document.getElementById('user-modal-backdrop');
+                if (backdrop && !backdrop.classList.contains('hidden')) {
+                  window.WorkVolt?.toast('Account created with access disabled. Enable it here when ready.', 'info');
+                } else if (attempts < 25) {
+                  setTimeout(tryOpen, 300);
+                }
+              };
+              setTimeout(tryOpen, 600);
+            }
+          }, 400);
+        }, 600);
       } catch(e) { setStatus(e.message, false); }
     });
 
@@ -1804,7 +1834,7 @@ window.WorkVoltPages['recruitment'] = function(container) {
         setStatus('<i class="fas fa-circle-notch fa-spin mr-1"></i>Processing…', true);
         const res = await doCompleteHire('Employee', true);
         const newUserId = res.user_account?.id || null;
-        toast(`${c.name || 'Candidate'} hired — opening user profile…`, 'success');
+        toast(`${c.name || 'Candidate'} hired — account created with access enabled`, 'success');
         closeModal();
         closeDetailPanel();
         await loadCandidates();
