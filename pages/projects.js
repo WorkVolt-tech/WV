@@ -19,7 +19,7 @@ window.WorkVoltPages['projects'] = function(container) {
 
   // Detail-view sub-state
   var taskView   = sessionStorage.getItem('proj_task_view') || 'list';
-  var taskFilter = { status: '', priority: '', assigned_to: '' };
+  var taskFilter = { status: '', priority: '', assignee: '' };
   var taskSearch = '';
   var focusMode  = false;
   var _searchTimer = null;
@@ -214,7 +214,7 @@ window.WorkVoltPages['projects'] = function(container) {
     tasks.forEach(function(t) {
       byStatus[t.status]     = (byStatus[t.status] || 0) + 1;
       if (t.priority) byPriority[t.priority] = (byPriority[t.priority] || 0) + 1;
-      var aid = t.assigned_to || t.assignee;
+      var aid = t.assignee || t.assignee;
       if (aid) byAssignee[aid] = (byAssignee[aid] || 0) + 1;
     });
 
@@ -473,7 +473,7 @@ window.WorkVoltPages['projects'] = function(container) {
     membersCache  = [];
     activityCache = [];
     statsCache    = {};
-    taskFilter    = { status: '', priority: '', assigned_to: '' };
+    taskFilter    = { status: '', priority: '', assignee: '' };
     taskSearch    = '';
     focusMode     = false;
 
@@ -691,7 +691,7 @@ window.WorkVoltPages['projects'] = function(container) {
       html += '<p class="text-[10px] font-extrabold text-slate-400 uppercase tracking-widest mb-2">Quick Filters</p>';
       var quickLinks = [
         { k: '',        icon: 'fa-th-large',    lbl: 'All Tasks',     count: Object.values(tasksCache).length },
-        { k: 'mine',    icon: 'fa-user',         lbl: 'Assigned to Me', count: Object.values(tasksCache).filter(function(t) { return t.assigned_to === myId; }).length },
+        { k: 'mine',    icon: 'fa-user',         lbl: 'Assigned to Me', count: Object.values(tasksCache).filter(function(t) { return t.assignee === myId; }).length },
         { k: 'overdue', icon: 'fa-fire',         lbl: 'Overdue',       count: Object.values(tasksCache).filter(isOverdue).length },
         { k: 'today',   icon: 'fa-calendar-day', lbl: 'Due Today',     count: Object.values(tasksCache).filter(function(t) {
           if (!t.due_date) return false;
@@ -771,13 +771,13 @@ window.WorkVoltPages['projects'] = function(container) {
             '<i class="fas fa-crosshairs text-[10px]"></i>Focus Mode — showing only your tasks today</span>'
           : '') +
         '<div class="ml-auto flex items-center gap-2">' +
-          '<select id="tf-status" class="field text-xs py-1.5" style="width:7.5rem">' +
+          '<select id="task-tf-status" class="field text-xs py-1.5" style="width:7.5rem">' +
             '<option value="">All Statuses</option>' +
             TASK_STATUSES.map(function(s) {
               return '<option value="' + s + '"' + (taskFilter.status === s ? ' selected' : '') + '>' + s + '</option>';
             }).join('') +
           '</select>' +
-          '<select id="tf-priority" class="field text-xs py-1.5" style="width:7rem">' +
+          '<select id="task-tf-priority" class="field text-xs py-1.5" style="width:7rem">' +
             '<option value="">All Priorities</option>' +
             TASK_PRIORITIES.map(function(p) {
               return '<option value="' + p + '"' + (taskFilter.priority === p ? ' selected' : '') + '>' + p + '</option>';
@@ -809,7 +809,7 @@ window.WorkVoltPages['projects'] = function(container) {
     if (focusMode) {
       var today = new Date(); today.setHours(0, 0, 0, 0);
       tasks = tasks.filter(function(t) {
-        if (t.assigned_to !== myId) return false;
+        if (t.assignee !== myId) return false;
         if (!t.due_date) return false;
         var d = new Date(t.due_date); d.setHours(0, 0, 0, 0);
         return d.getTime() === today.getTime();
@@ -817,8 +817,8 @@ window.WorkVoltPages['projects'] = function(container) {
     }
     if (taskFilter.status)      tasks = tasks.filter(function(t) { return t.status === taskFilter.status; });
     if (taskFilter.priority)    tasks = tasks.filter(function(t) { return t.priority === taskFilter.priority; });
-    if (taskFilter.assigned_to) tasks = tasks.filter(function(t) { return t.assigned_to === taskFilter.assigned_to; });
-    if (taskFilter.quick === 'mine')    tasks = tasks.filter(function(t) { return t.assigned_to === myId; });
+    if (taskFilter.assignee) tasks = tasks.filter(function(t) { return t.assignee === taskFilter.assignee; });
+    if (taskFilter.quick === 'mine')    tasks = tasks.filter(function(t) { return t.assignee === myId; });
     if (taskFilter.quick === 'overdue') tasks = tasks.filter(isOverdue);
     if (taskFilter.quick === 'today') {
       tasks = tasks.filter(function(t) {
@@ -910,7 +910,7 @@ window.WorkVoltPages['projects'] = function(container) {
         '</div>' +
       '</div>' +
       '<div class="flex items-center gap-2 flex-shrink-0">' +
-        (t.assigned_to ? userAvatar(t.assigned_to, 'w-6 h-6 text-[10px]') : '') +
+        (t.assignee ? userAvatar(t.assignee, 'w-6 h-6 text-[10px]') : '') +
         '<div class="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">' +
           '<button data-task-action="edit" data-task-id="' + esc(t.id) + '" title="Edit" class="w-6 h-6 rounded-lg bg-slate-100 hover:bg-blue-100 hover:text-blue-600 text-slate-400 flex items-center justify-center text-[10px] border-none cursor-pointer transition-colors"><i class="fas fa-pen"></i></button>' +
           (t.status !== 'Done'
@@ -943,7 +943,7 @@ window.WorkVoltPages['projects'] = function(container) {
                     '<p class="text-xs font-semibold text-slate-800 leading-snug mb-2 ' + (over ? 'text-red-700' : '') + '">' + esc(t.title) + '</p>' +
                     '<div class="flex items-center justify-between">' +
                       '<span class="inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-px rounded ' + pc.bg + ' ' + pc.text + '">' + esc(t.priority || '—') + '</span>' +
-                      (t.assigned_to ? userAvatar(t.assigned_to, 'w-5 h-5 text-[9px]') : '') +
+                      (t.assignee ? userAvatar(t.assignee, 'w-5 h-5 text-[9px]') : '') +
                     '</div>' +
                     (t.due_date ? '<p class="text-[10px] ' + (over ? 'text-red-500 font-bold mt-1' : 'text-slate-400 mt-1') + '">' + fmtDate(t.due_date) + '</p>' : '') +
                   '</div>';
@@ -1110,9 +1110,9 @@ window.WorkVoltPages['projects'] = function(container) {
       });
     });
 
-    var stSel = container.querySelector('#tf-status');
+    var stSel = container.querySelector('#task-tf-status');
     if (stSel) stSel.addEventListener('change', function() { taskFilter.status = this.value; refreshCenter(); });
-    var prSel = container.querySelector('#tf-priority');
+    var prSel = container.querySelector('#task-tf-priority');
     if (prSel) prSel.addEventListener('change', function() { taskFilter.priority = this.value; refreshCenter(); });
 
     var srch = container.querySelector('#task-search');
@@ -1178,43 +1178,74 @@ window.WorkVoltPages['projects'] = function(container) {
   }
 
   // ── Quick task operations ────────────────────────────────────────
-  function quickCreateTask(title) {
-    dbCreateTask({
-      title:      title,
-      project_id: activeProject.id,
-      status:     'To Do',
-      priority:   'Medium',
-      created_by: myId,
-    }).then(function(data) {
-      tasksCache[data.id] = data;
-      statsCache = computeStats(Object.values(tasksCache));
-      refreshCenter();
-      refreshRightPanel();
-      dbLogActivity(activeProject.id, myId, 'created task', title);
-      // Sync task_count back to the project row
-      dbUpdateProject(activeProject.id, {
-        task_count: statsCache.total,
-        tasks_done: statsCache.done,
-        progress:   statsCache.progress,
-      }).catch(function() {});
-      toast('Task created ✓', 'success');
-    }).catch(function(e) { toast(e.message, 'error'); });
-  }
+function quickCreateTask(title) {
+  dbCreateTask({
+    title:       title,
+    project:  activeProject.id,
+    status:      'To Do',
+    priority:    'Medium',
+    assignee:    null,  // explicitly set
+    created_by:  myId || null,
+  }).then(function(data) {
+    if (!data || !data.id) {
+      toast('Task created but response was invalid', 'error');
+      return;
+    }
+    tasksCache[data.id] = data;
+    statsCache = computeStats(Object.values(tasksCache));
+    refreshCenter();
+    refreshRightPanel();
+    dbLogActivity(activeProject.id, myId, 'created task', title);
+    // Sync task_count back to the project row
+    dbUpdateProject(activeProject.id, {
+      task_count: statsCache.total,
+      tasks_done: statsCache.done,
+      progress:   statsCache.progress,
+    }).catch(function() {});
+    toast('Task created ✓', 'success');
+  }).catch(function(e) { 
+    toast(e.message || 'Failed to create task', 'error'); 
+  });
+}
 
-  function quickUpdateTask(id, status) {
-    dbUpdateTask(id, { status: status }).then(function(data) {
-      tasksCache[id] = Object.assign({}, tasksCache[id], { status: status });
-      statsCache = computeStats(Object.values(tasksCache));
-      refreshCenter();
-      refreshRightPanel();
-      dbLogActivity(activeProject.id, myId, 'marked ' + status.toLowerCase(), tasksCache[id] ? tasksCache[id].title : id);
+function quickUpdateTask(id, status) {
+  var task = tasksCache[id];
+  if (!task) {
+    toast('Task not found in cache', 'error');
+    return;
+  }
+  
+  // Optimistic update
+  var oldStatus = task.status;
+  task.status = status;
+  refreshCenter();
+  
+  dbUpdateTask(id, { status: status }).then(function(data) {
+    // Merge server response to get updated timestamps
+    if (data) {
+      tasksCache[id] = Object.assign({}, tasksCache[id], data);
+    }
+    statsCache = computeStats(Object.values(tasksCache));
+    refreshCenter();
+    refreshRightPanel();
+    
+    // Log activity and update project stats
+    if (activeProject) {
+      dbLogActivity(activeProject.id, myId, 'marked ' + status.toLowerCase(), tasksCache[id].title || id);
       dbUpdateProject(activeProject.id, {
         task_count: statsCache.total,
         tasks_done: statsCache.done,
         progress:   statsCache.progress,
       }).catch(function() {});
-    }).catch(function(e) { toast(e.message, 'error'); });
-  }
+    }
+    toast('Status updated to ' + status, 'success');
+  }).catch(function(e) { 
+    // Revert on error
+    if (tasksCache[id]) tasksCache[id].status = oldStatus;
+    refreshCenter();
+    toast(e.message || 'Failed to update status', 'error'); 
+  });
+}
 
   function refreshRightPanel() {
     var rp = document.getElementById('proj-right-panel');
@@ -1394,16 +1425,16 @@ window.WorkVoltPages['projects'] = function(container) {
     var isEdit = !!task;
     function v(k) { return task ? (task[k] || '') : ''; }
 
-    var statusOpts   = TASK_STATUSES.map(function(s) {
-      return '<option value="' + s + '"' + (s === (v('status') || 'To Do') ? ' selected' : '') + '>' + s + '</option>';
-    }).join('');
+    var statusOpts = TASK_STATUSES.map(function(s) {
+  return '<option value="' + s + '"' + (s === (v('status') || 'To Do') ? ' selected' : '') + '>' + s + '</option>';
+}).join('');
     var priorityOpts = TASK_PRIORITIES.map(function(p) {
       return '<option value="' + p + '"' + (p === (v('priority') || 'Medium') ? ' selected' : '') + '>' + p + '</option>';
     }).join('');
     var assigneeOpts = '<option value="">— Unassigned —</option>' +
       usersCache.map(function(u) {
         var uid = u.user_id || u.id;
-        return '<option value="' + esc(uid) + '"' + (uid === v('assigned_to') ? ' selected' : '') + '>' + esc(u.name || u.email) + '</option>';
+        return '<option value="' + esc(uid) + '"' + (uid === v('assignee') ? ' selected' : '') + '>' + esc(u.name || u.email) + '</option>';
       }).join('');
 
     // Linked task dropdown (all tasks in the same project, excluding self)
@@ -1419,8 +1450,8 @@ window.WorkVoltPages['projects'] = function(container) {
         '<div>' +
           '<label class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1.5">Linked Task</label>' +
           '<div class="flex gap-2">' +
-            '<select id="tf-linked-task" class="field text-sm flex-1">' + taskOpts + '</select>' +
-            '<button type="button" id="tf-clear-linked" class="w-9 h-9 flex-shrink-0 rounded-xl border border-slate-200 bg-white text-slate-400 hover:text-red-500 hover:border-red-300 flex items-center justify-center text-sm transition-colors cursor-pointer">' +
+            '<select id="task-tf-linked-task" class="field text-sm flex-1">' + taskOpts + '</select>' +
+            '<button type="button" id="task-tf-clear-linked" class="w-9 h-9 flex-shrink-0 rounded-xl border border-slate-200 bg-white text-slate-400 hover:text-red-500 hover:border-red-300 flex items-center justify-center text-sm transition-colors cursor-pointer">' +
               '<i class="fas fa-times"></i></button>' +
           '</div>' +
         '</div>';
@@ -1429,57 +1460,57 @@ window.WorkVoltPages['projects'] = function(container) {
     var html =
       '<div class="px-6 py-5 border-b border-slate-100 flex items-center justify-between">' +
         '<h3 class="font-extrabold text-slate-900">' + (isEdit ? 'Edit Task' : 'New Task') + '</h3>' +
-        '<button id="tf-close" class="w-8 h-8 rounded-xl hover:bg-slate-100 flex items-center justify-center text-slate-400 border-none bg-transparent cursor-pointer text-base">✕</button>' +
+        '<button id="task-tf-close" class="w-8 h-8 rounded-xl hover:bg-slate-100 flex items-center justify-center text-slate-400 border-none bg-transparent cursor-pointer text-base">✕</button>' +
       '</div>' +
       '<div class="px-6 py-5 flex flex-col gap-4">' +
         '<div id="pm-status"></div>' +
         '<div><label class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1.5">Title <span class="text-red-400">*</span></label>' +
-        '<input id="tf-title" class="field" type="text" placeholder="Task title…" value="' + esc(v('title')) + '"></div>' +
+        '<input id="task-tf-title" class="field" type="text" placeholder="Task title…" value="' + esc(v('title')) + '"></div>' +
         '<div><label class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1.5">Description</label>' +
-        '<textarea id="tf-desc" class="field text-sm" rows="2" style="resize:none">' + esc(v('description')) + '</textarea></div>' +
+        '<textarea id="task-tf-desc" class="field text-sm" rows="2" style="resize:none">' + esc(v('description')) + '</textarea></div>' +
         '<div style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem">' +
           '<div><label class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1.5">Status</label>' +
-          '<select id="tf-status" class="field text-sm">' + statusOpts + '</select></div>' +
+          '<select id="taskform-status" class="field text-sm">' + statusOpts + '</select></div>' +
           '<div><label class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1.5">Priority</label>' +
-          '<select id="tf-priority" class="field text-sm">' + priorityOpts + '</select></div>' +
+          '<select id="taskform-priority" class="field text-sm">' + priorityOpts + '</select></div>' +
         '</div>' +
         '<div style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem">' +
           '<div>' +
             '<label class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1.5">Assigned To</label>' +
             '<div class="flex gap-2">' +
-              '<select id="tf-assignee" class="field text-sm flex-1">' + assigneeOpts + '</select>' +
-              '<button type="button" id="tf-clear-assignee" class="w-9 h-9 flex-shrink-0 rounded-xl flex items-center justify-center text-sm transition-colors cursor-pointer" style="border:1px solid #e2e8f0;background:#fff;color:#94a3b8">' +
+              '<select id="task-tf-assignee" class="field text-sm flex-1">' + assigneeOpts + '</select>' +
+              '<button type="button" id="task-tf-clear-assignee" class="w-9 h-9 flex-shrink-0 rounded-xl flex items-center justify-center text-sm transition-colors cursor-pointer" style="border:1px solid #e2e8f0;background:#fff;color:#94a3b8">' +
                 '<i class="fas fa-user-times"></i></button>' +
             '</div>' +
           '</div>' +
           '<div><label class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1.5">Due Date</label>' +
-          '<input id="tf-due" class="field text-sm" type="date" value="' + esc(v('due_date')) + '"></div>' +
+          '<input id="task-tf-due" class="field text-sm" type="date" value="' + esc(v('due_date')) + '"></div>' +
         '</div>' +
         '<div><label class="block text-xs font-bold text-slate-500 uppercase tracking-wide mb-1.5">Estimated Hours</label>' +
-        '<input id="tf-est" class="field text-sm" type="number" step="0.5" min="0" placeholder="e.g. 4" value="' + esc(v('estimated_hours')) + '"></div>' +
+        '<input id="task-tf-est" class="field text-sm" type="number" step="0.5" min="0" placeholder="e.g. 4" value="' + esc(v('estimated_hours')) + '"></div>' +
         linkedTaskField +
         '<div class="flex gap-3 pt-2">' +
           (isEdit && isAdmin()
-            ? '<button id="tf-delete" class="px-4 py-2.5 rounded-xl bg-red-50 text-red-600 font-bold text-sm hover:bg-red-100 transition-colors border-none cursor-pointer"><i class="fas fa-trash text-xs mr-1"></i>Delete</button>'
+            ? '<button id="task-tf-delete" class="px-4 py-2.5 rounded-xl bg-red-50 text-red-600 font-bold text-sm hover:bg-red-100 transition-colors border-none cursor-pointer"><i class="fas fa-trash text-xs mr-1"></i>Delete</button>'
             : '') +
-          '<button id="tf-cancel" class="btn-secondary flex-1">Cancel</button>' +
-          '<button id="tf-save" class="btn-primary flex-1"><i class="fas fa-' + (isEdit ? 'save' : 'plus') + ' text-xs mr-1"></i>' + (isEdit ? 'Save Changes' : 'Create Task') + '</button>' +
+          '<button id="task-tf-cancel" class="btn-secondary flex-1">Cancel</button>' +
+          '<button id="task-tf-save" class="btn-primary flex-1"><i class="fas fa-' + (isEdit ? 'save' : 'plus') + ' text-xs mr-1"></i>' + (isEdit ? 'Save Changes' : 'Create Task') + '</button>' +
         '</div>' +
       '</div>';
 
     showModal(html, '520px');
 
-    document.getElementById('tf-close').addEventListener('click', closeModal);
-    document.getElementById('tf-cancel').addEventListener('click', closeModal);
+    document.getElementById('task-tf-close').addEventListener('click', closeModal);
+    document.getElementById('task-tf-cancel').addEventListener('click', closeModal);
 
-    var clearAssignee = document.getElementById('tf-clear-assignee');
-    if (clearAssignee) clearAssignee.addEventListener('click', function() { document.getElementById('tf-assignee').value = ''; });
+    var clearAssignee = document.getElementById('task-tf-clear-assignee');
+    if (clearAssignee) clearAssignee.addEventListener('click', function() { document.getElementById('task-tf-assignee').value = ''; });
 
-    var clearLinked = document.getElementById('tf-clear-linked');
-    if (clearLinked) clearLinked.addEventListener('click', function() { document.getElementById('tf-linked-task').value = ''; });
+    var clearLinked = document.getElementById('task-tf-clear-linked');
+    if (clearLinked) clearLinked.addEventListener('click', function() { document.getElementById('task-tf-linked-task').value = ''; });
 
     if (isEdit && isAdmin()) {
-      var delBtn = document.getElementById('tf-delete');
+      var delBtn = document.getElementById('task-tf-delete');
       if (delBtn) delBtn.addEventListener('click', function() {
         if (!confirm('Delete task "' + (task.title || '') + '"?')) return;
         dbDeleteTask(task.id).then(function() {
@@ -1499,8 +1530,8 @@ window.WorkVoltPages['projects'] = function(container) {
       });
     }
 
-    document.getElementById('tf-save').addEventListener('click', function() {
-      var title = document.getElementById('tf-title').value.trim();
+    document.getElementById('task-tf-save').addEventListener('click', function() {
+      var title = document.getElementById('task-tf-title').value.trim();
       if (!title) { modalStatus('Title is required', false); return; }
 
       var btn = this;
@@ -1508,19 +1539,19 @@ window.WorkVoltPages['projects'] = function(container) {
       btn.innerHTML = '<i class="fas fa-circle-notch fa-spin text-xs mr-1"></i>Saving…';
       modalStatus('', null);
 
-      var linkedTaskEl = document.getElementById('tf-linked-task');
+      var linkedTaskEl = document.getElementById('task-tf-linked-task');
       var params = {
         title:           title,
-        description:     document.getElementById('tf-desc').value.trim(),
-        status:          document.getElementById('tf-status').value,
-        priority:        document.getElementById('tf-priority').value,
-        assigned_to:     document.getElementById('tf-assignee').value || null,
-        due_date:        document.getElementById('tf-due').value || null,
-        estimated_hours: parseFloat(document.getElementById('tf-est').value) || null,
-        project_id:      activeProject ? activeProject.id : null,
+        description:     document.getElementById('task-tf-desc').value.trim(),
+        status:          document.getElementById('taskform-status').value || 'To Do',
+        priority:        document.getElementById('taskform-priority').value || 'Medium',
+        assignee:        document.getElementById('task-tf-assignee').value || null,
+        due_date:        document.getElementById('task-tf-due').value || null,
+        estimated_hours: parseFloat(document.getElementById('task-tf-est').value) || null,
+        project:         activeProject ? activeProject.id : null,
       };
       if (linkedTaskEl) params.linked_task_id = linkedTaskEl.value || null;
-      if (!isEdit) params.created_by = myId || null;
+      
 
       var promise = isEdit
         ? dbUpdateTask(task.id, params)
@@ -1599,7 +1630,7 @@ window.WorkVoltPages['projects'] = function(container) {
       btn.disabled = true;
       dbAddMember(activeProject.id, uid, role)
         .then(function() {
-          membersCache.push({ project_id: activeProject.id, user_id: uid, role: role });
+          membersCache.push({ project:  activeProject.id, user_id: uid, role: role });
           closeModal();
           var lp = document.getElementById('proj-left-panel');
           if (lp) { lp.innerHTML = renderLeftPanel(); wireLeftPanel(); }
