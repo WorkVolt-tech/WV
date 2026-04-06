@@ -141,9 +141,9 @@ class SupabaseAdapter extends BaseAdapter {
   }
 
   async update(table, id, patch, idCol = 'id') {
-    const { data, error } = await this._client.from(table).update(patch).eq(idCol, id).select().single();
+    const { data, error } = await this._client.from(table).update(patch).eq(idCol, id).select();
     if (error) throw new Error(error.message);
-    return data;
+    return data?.[0] || null;
   }
 
   async delete(table, id, idCol = 'id') {
